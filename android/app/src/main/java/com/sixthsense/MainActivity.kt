@@ -37,6 +37,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusView: TextView
     private lateinit var previewView: PreviewView
     private lateinit var hapticsButton: Button
+    private lateinit var testRunButton: Button
+    private var testRunActive = false
     private var socket: SceneSocket? = null
     private val gson = GsonBuilder().setPrettyPrinting().create()
 
@@ -52,6 +54,13 @@ class MainActivity : AppCompatActivity() {
     ) { granted ->
         if (granted) startLiveVision()
         else toast("Camera permission denied — live vision needs the camera.")
+    }
+
+    private val requestCameraForTestRun = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) startFullTestRun()
+        else toast("Camera permission denied — the full test run needs the camera.")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -104,6 +113,12 @@ class MainActivity : AppCompatActivity() {
             )
             setOnClickListener { onClick() }
         }
+
+        // One-tap full test run: camera + on-device detection + directional phone
+        // haptics together. Approach an object; when detection fires, the phone
+        // buzzes in that direction. Tap again to exit.
+        testRunButton = button(getString(R.string.btn_test_run_start)) { toggleFullTestRun() }
+        root.addView(testRunButton)
 
         root.addView(button(getString(R.string.btn_start_vision)) { connectCameraAndStart() })
         root.addView(button(getString(R.string.btn_stop_vision)) {
@@ -159,6 +174,38 @@ class MainActivity : AppCompatActivity() {
         AppGraph.visionPipeline.start(this, previewView)
     }
 
+    /** One button: enter/exit a full test run (camera + detection + phone haptics). */
+    private fun toggleFullTestRun() {
+        if (testRunActive) {
+            stopFullTestRun()
+        } else if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+            == PackageManager.PERMISSION_GRANTED
+        ) {
+            startFullTestRun()
+        } else {
+            requestCameraForTestRun.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    private fun startFullTestRun() {
+        testRunActive = true
+        AppGraph.visionPipeline.start(this, previewView)
+        AppGraph.phoneHaptics.setEnabled(true)
+        testRunButton.text = getString(R.string.btn_test_run_stop)
+        hapticsButton.text = getString(R.string.btn_haptics_on)
+        if (!AppGraph.phoneHaptics.hasVibrator()) toast("This device has no vibration motor.")
+        toast("Test run on — approach an object; the phone buzzes toward it.")
+    }
+
+    private fun stopFullTestRun() {
+        testRunActive = false
+        AppGraph.phoneHaptics.setEnabled(false)
+        AppGraph.visionPipeline.stop()
+        testRunButton.text = getString(R.string.btn_test_run_start)
+        hapticsButton.text = getString(R.string.btn_haptics_off)
+        toast("Test run off.")
+    }
+
     private fun togglePhoneHaptics() {
         val controller = AppGraph.phoneHaptics
         val enable = !controller.isEnabled()
@@ -195,8 +242,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renderStatus(s: VisionStatus): String = buildString {
-        append("vision: ${if (s.running) "ON" else "off"}  backend=${s.backend}\n")
-        append("models: depth=${if (s.depthLoaded) "✓" else "—"}  yolo=${if (s.yoloLoaded) "✓" else "—"}\n")
+        append("vision: ${if (s.running) "ON" else "off"}  backend=${s.backend}  testRun=$testRunActive\n")
+        append("models: depth=${if (s.depthLoaded) "✓" else "—"}  yolo=${if (s.yoloLoaded) "✓" else "—"}  detections=${s.detections}\n")
         append("fps=%.1f  depth=%.0fms  yolo=%.0fms\n".format(s.fps, s.depthMs, s.yoloMs))
         append(s.note)
     }

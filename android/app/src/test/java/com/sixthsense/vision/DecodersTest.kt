@@ -92,4 +92,17 @@ class DecodersTest {
         val depth = FloatArray(100) { it.toFloat() }
         assertEquals(0f, DepthDecoder.bandPercentile(depth, 10, 5, 5, 0, 10, 0.9f), 0f)
     }
+
+    @Test
+    fun no_depth_nearness_grows_with_box_size_and_maps_zone() {
+        // A big right-side box (closer) should yield higher nearness than a small one.
+        val small = RawDet(x1 = 500f, y1 = 300f, x2 = 540f, y2 = 340f, score = 0.8f, classId = 2)
+        val big = RawDet(x1 = 420f, y1 = 200f, x2 = 640f, y2 = 480f, score = 0.8f, classId = 2)
+        val objs = SceneAssembler.toDetectedObjectsNoDepth(listOf(small, big), yoloInput = 640)
+        assertEquals(2, objs.size)
+        val smallObj = objs[0]; val bigObj = objs[1]
+        assertEquals("right", bigObj.zone)
+        assertTrue("bigger box => nearer", bigObj.nearness > smallObj.nearness)
+        assertTrue(bigObj.nearness in 0f..1f)
+    }
 }

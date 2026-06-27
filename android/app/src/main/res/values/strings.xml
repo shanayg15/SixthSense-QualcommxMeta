@@ -4,6 +4,8 @@
     <string name="title">SixthSense</string>
     <string name="subtitle">Operator / developer console (not the end-user UI)</string>
 
+    <string name="btn_test_run_start">▶ Full Test Run (vision + haptics)</string>
+    <string name="btn_test_run_stop">■ Stop Test Run</string>
     <string name="btn_start_vision">Start Live Vision (on-device)</string>
     <string name="btn_stop_vision">Stop Live Vision</string>
     <string name="btn_haptics_on">Phone Haptics Test Mode: ON</string>

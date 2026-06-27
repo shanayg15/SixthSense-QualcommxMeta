@@ -3,6 +3,13 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Backend selector. Default = XNNPACK (CPU): pure Maven, always builds.
+// Qualcomm QNN / Hexagon NPU: build with -PuseQnn=true after running
+// scripts/setup_qnn_backend.sh (downloads the QNN AAR) and placing the QNN HTP
+// runtime .so under app/src/main/jniLibs/arm64-v8a/. See
+// docs/ondevice_vision_and_phone_haptics.md.
+val useQnn = (project.findProperty("useQnn") as String?)?.toBoolean() ?: false
+
 android {
     namespace = "com.sixthsense"
     compileSdk = 35
@@ -20,10 +27,8 @@ android {
             abiFilters += "arm64-v8a"
         }
 
-        // Active ExecuTorch backend, surfaced in the operator UI. The plain Maven
-        // executorch-android AAR is XNNPACK(CPU). When swapping in the QNN AAR for
-        // the Hexagon NPU build, change this to "qnn".
-        buildConfigField("String", "EXECUTORCH_BACKEND", "\"xnnpack\"")
+        // Active ExecuTorch backend, surfaced in the operator UI. Driven by -PuseQnn.
+        buildConfigField("String", "EXECUTORCH_BACKEND", if (useQnn) "\"qnn\"" else "\"xnnpack\"")
     }
 
     buildTypes {
@@ -76,21 +81,20 @@ dependencies {
     // WebSocket server for the dashboard bridge
     implementation("org.java-websocket:Java-WebSocket:1.5.7")
 
-    // ExecuTorch on-device runtime.
-    // CPU / XNNPACK path (ship now): pure Maven; pulls fbjni + soloader transitively.
-    implementation("org.pytorch:executorch-android:1.3.1")
-
-    // Qualcomm QNN / Hexagon NPU path (drop-in later — see
-    // docs/ondevice_vision_and_phone_haptics.md). To switch:
-    //  1) download the prebuilt QNN AAR to android/app/libs/executorch-qnn-1.3.1.aar:
-    //     https://ossci-android.s3.amazonaws.com/executorch/release/1.3.1-qnn/executorch.aar
-    //  2) REMOVE the Maven line above (two libexecutorch.so would clash) and use:
-    //       implementation(files("libs/executorch-qnn-1.3.1.aar"))
-    //       implementation("com.facebook.fbjni:fbjni:0.7.0")        // not transitive from a local AAR
-    //       implementation("com.facebook.soloader:nativeloader:0.10.5")
-    //  3) bundle the Qualcomm QNN HTP runtime .so (libQnnHtp.so, the SM8750/Hexagon-v79
-    //     HTP skel, libQnnSystem.so, stubs) under src/main/jniLibs/arm64-v8a/
-    //  4) flip EXECUTORCH_BACKEND above to "qnn" and ship a QNN-exported .pte.
+    // ExecuTorch on-device runtime — backend chosen by -PuseQnn (see top of file).
+    if (useQnn) {
+        // Qualcomm QNN / Hexagon NPU. Requires: scripts/setup_qnn_backend.sh (downloads
+        // app/libs/executorch-qnn-1.3.1.aar) AND the QNN HTP runtime .so (libQnnHtp.so,
+        // the SM8750/Hexagon-v79 HTP skel, libQnnSystem.so, stubs) in
+        // src/main/jniLibs/arm64-v8a/, AND a QNN-exported .pte. fbjni/soloader are not
+        // transitive from a local AAR, so add them explicitly.
+        implementation(files("libs/executorch-qnn-1.3.1.aar"))
+        implementation("com.facebook.fbjni:fbjni:0.7.0")
+        implementation("com.facebook.soloader:nativeloader:0.10.5")
+    } else {
+        // CPU / XNNPACK (default): pure Maven; pulls fbjni + soloader transitively.
+        implementation("org.pytorch:executorch-android:1.3.1")
+    }
 
     // Unit tests for the pure decoders + directional haptics encoding.
     testImplementation("junit:junit:4.13.2")

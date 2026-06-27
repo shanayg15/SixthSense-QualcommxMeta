@@ -54,6 +54,10 @@ android/app/*.iml
 *.aab
 *.ap_
 *.dex
+# Local ExecuTorch AARs (e.g. the QNN backend) + native libs — fetched out of band.
+android/app/libs/
+android/app/src/main/jniLibs/
+*.aar
 
 # ---- Models (large binaries — keep out of git) ----
 *.pte

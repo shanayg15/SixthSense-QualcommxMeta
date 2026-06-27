@@ -10,8 +10,16 @@ package com.sixthsense.core
  */
 object BeltMapper {
 
-    /** Nearness below this maps to no buzz. */
+    /** Depth nearness below this maps to no buzz. */
     const val NEAR_THRESHOLD = 0.55f
+
+    /**
+     * Object nearness below this maps to no buzz. A confirmed detection warrants an
+     * earlier warning than raw depth, so this is a little lower than [NEAR_THRESHOLD]:
+     * as the user approaches a detected object its nearness rises past this and the
+     * belt/haptics buzz in that object's zone.
+     */
+    const val OBJECT_NEAR_THRESHOLD = 0.45f
 
     /** Low-confidence threshold: below this we emit a cautious center pulse only. */
     const val LOW_CONF = 0.4f
@@ -40,6 +48,21 @@ object BeltMapper {
         var l = intensity(scene.depth.left)
         var c = intensity(scene.depth.center)
         var r = intensity(scene.depth.right)
+
+        // Fuse detected objects: a detected obstacle asserts a buzz in its zone, so
+        // object detection drives directional haptics (even when depth is flat or
+        // absent — in that case nearness comes from box size). Take the max so depth
+        // and detection reinforce rather than cancel.
+        for (o in scene.objects) {
+            val oi = objectIntensity(o.nearness)
+            if (oi == 0) continue
+            when (o.zone) {
+                "left" -> l = maxOf(l, oi)
+                "right" -> r = maxOf(r, oi)
+                else -> c = maxOf(c, oi)
+            }
+        }
+
         var pattern = PATTERN_STEADY
 
         // Curb / step takes priority: strong center double-pulse.
@@ -72,4 +95,14 @@ object BeltMapper {
             .toInt()
             .coerceIn(0, 255)
     }
+
+    /** Object nearness -> intensity, with a perceptible floor so any near detection is felt. */
+    private fun objectIntensity(nearness: Float): Int {
+        if (nearness < OBJECT_NEAR_THRESHOLD) return 0
+        val scaled = ((nearness - OBJECT_NEAR_THRESHOLD) / (1f - OBJECT_NEAR_THRESHOLD)) * 255f
+        return scaled.toInt().coerceIn(OBJECT_MIN, 255)
+    }
+
+    /** Minimum buzz for a detected object that is past [OBJECT_NEAR_THRESHOLD]. */
+    private const val OBJECT_MIN = 90
 }

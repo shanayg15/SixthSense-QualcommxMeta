@@ -35,36 +35,47 @@ android/app/src/main/assets/models/
   yolo.pte      (or yolo11n.pte / yolov11n.pte)
 ```
 
-The pipeline tries those candidate names and **degrades gracefully**: with no depth model it stays
-idle (use Mock mode); with depth but no YOLO it runs depth-only (belt works, no object labels). The
-app builds and runs with zero `.pte` present.
+The pipeline tries those candidate names and **degrades gracefully** — and depth and YOLO are now
+**independent**: depth-only runs the belt with no labels; **YOLO-only runs object detection and
+drives the haptics on its own** (object nearness is approximated from box size, so walking toward an
+object grows the buzz); both together is best. The app builds and runs with zero `.pte` present.
+
+### Detection drives the haptics
+
+`BeltMapper` fuses `scene.objects` into the belt/haptic packet: a detected obstacle past
+`OBJECT_NEAR_THRESHOLD` asserts a buzz in its zone (left/center/right), taking the max with the
+depth-derived value. So **when object detection fires, the belt and the phone buzz toward that
+object** — that is what the Full Test Run mode relies on.
 
 ### Running it
 
-Tap **Start Live Vision** (grant CAMERA). The operator status line shows the active backend, per-
-model latency, and fps. CPU/XNNPACK is slow on purpose (~1–2 fps) — the NPU swap below fixes speed.
+- **Full Test Run** (one tap): camera + on-device detection + directional phone haptics together —
+  approach an object and the phone buzzes in its direction. Tap again to stop.
+- **Start Live Vision** / **Phone Haptics Test Mode** toggle them individually.
+
+Grant CAMERA when prompted. The operator status line shows the active backend, models loaded,
+**live detection count**, per-model latency, and fps. CPU/XNNPACK is slow on purpose (~1–2 fps) —
+the QNN/NPU backend below fixes speed.
 
 ## 2. CPU now, Qualcomm NPU later (drop-in)
 
-The ExecuTorch backend is baked into the `.pte` at **export time**; the Kotlin is identical for
-CPU and NPU. Today we ship the Maven `org.pytorch:executorch-android:1.3.1` AAR (XNNPACK/CPU). To
-move inference onto the **Hexagon NPU** on the Galaxy S25 Ultra (SM8750):
+The ExecuTorch backend is baked into the `.pte` at **export time**; the Kotlin is identical for CPU
+and NPU. The backend is now a **build flag** — default XNNPACK/CPU (`org.pytorch:executorch-android:1.3.1`),
+or Qualcomm QNN/Hexagon-NPU with `-PuseQnn=true`. To run on the **Hexagon NPU** (Galaxy S25 Ultra,
+SM8750):
 
-1. Download the prebuilt QNN AAR to `android/app/libs/executorch-qnn-1.3.1.aar`:
-   `https://ossci-android.s3.amazonaws.com/executorch/release/1.3.1-qnn/executorch.aar`
-2. In `app/build.gradle.kts`, **remove** the Maven `executorch-android` line (two
-   `libexecutorch.so` would clash) and add:
-   ```kotlin
-   implementation(files("libs/executorch-qnn-1.3.1.aar"))
-   implementation("com.facebook.fbjni:fbjni:0.7.0")          // not transitive from a local AAR
-   implementation("com.facebook.soloader:nativeloader:0.10.5")
-   ```
-3. Bundle the Qualcomm QNN HTP runtime `.so` (`libQnnHtp.so`, the SM8750/Hexagon-v79 HTP skel,
-   `libQnnSystem.so`, stubs) under `app/src/main/jniLibs/arm64-v8a/`.
-4. Flip `EXECUTORCH_BACKEND` to `"qnn"` in `build.gradle.kts` and ship a **QNN-exported** `.pte`
-   (export with `QnnPartitioner` + HTP compiler spec for SM8750 on the Linux box).
+1. `bash scripts/setup_qnn_backend.sh` — downloads the prebuilt QNN AAR to
+   `android/app/libs/executorch-qnn-1.3.1.aar` (the `-PuseQnn=true` build links it and adds
+   fbjni/soloader automatically; `EXECUTORCH_BACKEND` flips to `"qnn"`).
+2. Copy the Qualcomm QNN HTP runtime `.so` (`libQnnHtp.so`, the SM8750/Hexagon-v79 HTP skel,
+   `libQnnSystem.so`, stubs) from your QNN SDK into `app/src/main/jniLibs/arm64-v8a/`.
+3. Drop a **QNN-exported** `.pte` (export with `QnnPartitioner` + HTP compiler spec for SM8750 on
+   the Linux box) into `app/src/main/assets/models/`.
+4. Build: `cd android && ./gradlew assembleDebug -PuseQnn=true`.
 
-No app-code change is needed — same `Module.load` / `forward`.
+No app-code change is needed — same `Module.load` / `forward`; `EtModule` is backend-agnostic and
+logs the active backend. Steps 2–3 need the Qualcomm QNN SDK / Linux export box and cannot be
+fetched from a public URL; the default CPU build keeps working meanwhile.
 
 ## 3. Directional phone-haptics test mode
 

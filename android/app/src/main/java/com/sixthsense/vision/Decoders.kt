@@ -271,4 +271,28 @@ object SceneAssembler {
             )
         }
     }
+
+    /** Box-area fraction at which a detection counts as "very near" (1.0). Tune on device. */
+    const val AREA_GAIN = 3.0f
+
+    /**
+     * Detection-only path (no depth model): nearness is approximated from the box's
+     * area fraction (a bigger box = closer, so walking toward an object grows the
+     * buzz). Lets object detection drive directional haptics even without depth.
+     */
+    fun toDetectedObjectsNoDepth(dets: List<RawDet>, yoloInput: Int = 640): List<DetectedObj> {
+        if (dets.isEmpty()) return emptyList()
+        val frameArea = yoloInput.toFloat() * yoloInput
+        return dets.map { d ->
+            val cx = (d.x1 + d.x2) * 0.5f
+            val area = max(0f, d.x2 - d.x1) * max(0f, d.y2 - d.y1)
+            val nearness = (area / frameArea * AREA_GAIN).coerceIn(0f, 1f)
+            DetectedObj(
+                label = COCO_LABELS.getOrElse(d.classId) { "object" },
+                zone = YoloDecoder.zoneForCenterX(cx, yoloInput),
+                nearness = nearness,
+                conf = d.score,
+            )
+        }
+    }
 }

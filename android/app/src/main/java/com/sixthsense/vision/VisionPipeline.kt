@@ -12,6 +12,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.sixthsense.BuildConfig
 import com.sixthsense.core.BeltMapper
+import com.sixthsense.core.DepthZones
 import com.sixthsense.core.DetectedObj
 import com.sixthsense.core.SceneBus
 import com.sixthsense.core.SceneState
@@ -31,6 +32,7 @@ data class VisionStatus(
     val depthMs: Double = 0.0,
     val yoloMs: Double = 0.0,
     val fps: Double = 0.0,
+    val detections: Int = 0,
     val note: String = "idle",
 )
 
@@ -118,12 +120,15 @@ class VisionPipeline(
     private fun loadModels() {
         depthModule = EtModule.tryLoad(context, DEPTH_ASSETS)
         yoloModule = EtModule.tryLoad(context, YOLO_ASSETS)
+        val backend = BuildConfig.EXECUTORCH_BACKEND
         val note = when {
+            depthModule == null && yoloModule == null ->
+                "No models in assets/models — add depth.pte / yolo.pte, or use Mock mode."
             depthModule == null ->
-                "No depth model in assets/models — live vision idle. Add depth.pte or use Mock mode."
+                "YOLO only ($backend) — detection drives haptics; nearness from box size."
             yoloModule == null ->
-                "Depth only (no YOLO) — belt works; no object labels."
-            else -> "Depth + YOLO loaded on ${BuildConfig.EXECUTORCH_BACKEND}."
+                "Depth only ($backend) — belt works; no object labels."
+            else -> "Depth + YOLO loaded on $backend."
         }
         _status.value = _status.value.copy(
             depthLoaded = depthModule != null,
@@ -163,25 +168,47 @@ class VisionPipeline(
     /** Runs on [analysisExecutor], never the main thread. */
     private fun analyze(image: ImageProxy) {
         try {
-            val depth = depthModule ?: return  // not loaded / absent -> emit nothing (safe)
+            val depth = depthModule
+            val yolo = yoloModule
+            if (depth == null && yolo == null) return  // nothing loaded -> emit nothing (safe)
 
-            val t0 = System.nanoTime()
-            val depthOut = depth.forward(depthConv.toTensor(image))
-            val depthMs = (System.nanoTime() - t0) / 1_000_000.0
-            val (dw, dh) = depthDims(depthOut)
-            val zones = DepthDecoder.toZones(depthOut.data, dw, dh)
+            // Depth (if present) -> zones + a depth map for object nearness.
+            var zones = DepthZones(0f, 0f, 0f)
+            var depthData: FloatArray? = null
+            var dw = 0; var dh = 0
+            var depthMs = 0.0
+            if (depth != null) {
+                val t0 = System.nanoTime()
+                val depthOut = depth.forward(depthConv.toTensor(image))
+                depthMs = (System.nanoTime() - t0) / 1_000_000.0
+                val dims = depthDims(depthOut)
+                dw = dims.first; dh = dims.second
+                depthData = depthOut.data
+                zones = DepthDecoder.toZones(depthOut.data, dw, dh)
+            }
 
+            // YOLO (if present) -> objects. Nearness from depth when available, else
+            // from box size — so object detection runs and drives haptics standalone.
             var objects: List<DetectedObj> = emptyList()
             var yoloMs = 0.0
-            yoloModule?.let { yolo ->
+            if (yolo != null) {
                 val t1 = System.nanoTime()
                 val yoloOut = yolo.forward(yoloConv.toTensor(image))
                 yoloMs = (System.nanoTime() - t1) / 1_000_000.0
                 val dets = YoloDecoder.decode(yoloOut.data, inputSize = YOLO_SIZE)
-                objects = SceneAssembler.toDetectedObjects(dets, depthOut.data, dw, dh, YOLO_SIZE)
+                objects = if (depthData != null)
+                    SceneAssembler.toDetectedObjects(dets, depthData, dw, dh, YOLO_SIZE)
+                else
+                    SceneAssembler.toDetectedObjectsNoDepth(dets, YOLO_SIZE)
             }
 
-            val pathClear = !zones.curbAhead && zones.center < BeltMapper.NEAR_THRESHOLD
+            // Path is clear only if neither depth nor a centered near object blocks it.
+            val centerObjNear = objects.any {
+                it.zone == "center" && it.nearness >= BeltMapper.OBJECT_NEAR_THRESHOLD
+            }
+            val pathClear =
+                !zones.curbAhead && zones.center < BeltMapper.NEAR_THRESHOLD && !centerObjNear
+
             val base = SceneState(
                 ts = System.currentTimeMillis(),
                 depth = zones,
@@ -190,7 +217,7 @@ class VisionPipeline(
                 conf = LIVE_CONF,
             )
             bus.emit(base.copy(belt = BeltMapper.packetAsInts(base)))
-            updateStatus(depthMs, yoloMs)
+            updateStatus(depthMs, yoloMs, objects.size)
         } catch (e: Throwable) {
             Log.w(TAG, "analyze error: ${e.message}")
         } finally {
@@ -198,7 +225,7 @@ class VisionPipeline(
         }
     }
 
-    private fun updateStatus(depthMs: Double, yoloMs: Double) {
+    private fun updateStatus(depthMs: Double, yoloMs: Double, detections: Int) {
         val now = System.nanoTime()
         if (lastFrameNs != 0L) {
             val inst = 1_000_000_000.0 / (now - lastFrameNs).coerceAtLeast(1)
@@ -209,6 +236,7 @@ class VisionPipeline(
             depthMs = depthMs,
             yoloMs = yoloMs,
             fps = (emaFps * 10).roundToInt() / 10.0,
+            detections = detections,
         )
     }
 
