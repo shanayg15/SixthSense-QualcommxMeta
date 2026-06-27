@@ -1,2 +1,2 @@
-# SixthSense-
+# SixthSense
 Meta X Qualcom Hackathon
