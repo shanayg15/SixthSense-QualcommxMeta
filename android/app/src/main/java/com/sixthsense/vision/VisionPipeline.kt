@@ -171,7 +171,9 @@ class VisionPipeline(
                 val provider = future.get()
                 cameraProvider = provider
                 val preview = previewView?.let { pv ->
-                    Preview.Builder().build().also { it.surfaceProvider = pv.surfaceProvider }
+                    // Preview has setSurfaceProvider() but no getter, so it's not a Kotlin
+                    // property — call the method (not `it.surfaceProvider = …`).
+                    Preview.Builder().build().also { it.setSurfaceProvider(pv.surfaceProvider) }
                 }
                 val analysis = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
