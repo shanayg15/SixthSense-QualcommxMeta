@@ -19,10 +19,18 @@ class VoiceAgent(private val bus: SceneBus) {
 
     enum class Intent { SCENE, OCR, FIND, CLEAR }
 
+    /**
+     * Optional sink for the dashboard bridge: invoked with (question, intent,
+     * answer) on every [ask] so the operator dashboard can display the agent's
+     * interaction. Wired in MainActivity to SceneSocket.updateVoice.
+     */
+    var onAnswer: ((String, String, String) -> Unit)? = null
+
     /** Answer a question from the current scene. Returns the spoken-answer text. */
     fun ask(question: String): String {
         val scene = bus.state.value
-        val answer = when (route(question)) {
+        val intent = route(question)
+        val answer = when (intent) {
             Intent.SCENE -> describeScene(scene)
             Intent.OCR -> if (scene.ocr.present && scene.ocr.text.isNotBlank())
                 "The sign says: ${scene.ocr.text}." else "I don't see readable text."
@@ -33,6 +41,7 @@ class VoiceAgent(private val bus: SceneBus) {
         }
         Log.i(TAG, "Q='$question' -> A='$answer'")
         // TODO(voice): speak `answer` via offline Android TextToSpeech.
+        onAnswer?.invoke(question, intent.name, answer)
         return answer
     }
 

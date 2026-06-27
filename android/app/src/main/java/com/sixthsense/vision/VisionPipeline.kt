@@ -1,6 +1,8 @@
 package com.sixthsense.vision
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.util.Base64
 import android.util.Log
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -16,6 +18,7 @@ import com.sixthsense.core.DepthZones
 import com.sixthsense.core.DetectedObj
 import com.sixthsense.core.SceneBus
 import com.sixthsense.core.SceneState
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
@@ -66,6 +69,13 @@ class VisionPipeline(
     private var cameraProvider: ProcessCameraProvider? = null
     private var lastFrameNs = 0L
     private var emaFps = 0.0
+    private var lastFrameEmitMs = 0L
+
+    /** Dashboard frame sink: a downscaled base64 JPEG of the live camera + its rotation. */
+    var onFrame: ((String, Int) -> Unit)? = null
+
+    /** Only encode/stream the dashboard frame while a dashboard client is connected. */
+    var shouldStreamFrame: () -> Boolean = { false }
 
     private val _status = MutableStateFlow(VisionStatus())
     val status: StateFlow<VisionStatus> = _status.asStateFlow()
@@ -168,6 +178,8 @@ class VisionPipeline(
     /** Runs on [analysisExecutor], never the main thread. */
     private fun analyze(image: ImageProxy) {
         try {
+            // Stream the raw camera frame to the dashboard even before models load.
+            maybeStreamFrame(image)
             val depth = depthModule
             val yolo = yoloModule
             if (depth == null && yolo == null) return  // nothing loaded -> emit nothing (safe)
@@ -225,6 +237,45 @@ class VisionPipeline(
         }
     }
 
+    /** Throttled: encode the current RGBA frame to a small JPEG for the dashboard. */
+    private fun maybeStreamFrame(image: ImageProxy) {
+        val sink = onFrame ?: return
+        if (!shouldStreamFrame()) return
+        val now = System.currentTimeMillis()
+        if (now - lastFrameEmitMs < FRAME_MIN_INTERVAL_MS) return
+        lastFrameEmitMs = now
+        val b64 = encodeJpegBase64(image) ?: return
+        sink(b64, image.imageInfo.rotationDegrees)
+    }
+
+    /** RGBA_8888 ImageProxy -> downscaled JPEG -> base64 (reuses the pipeline's camera). */
+    private fun encodeJpegBase64(image: ImageProxy): String? {
+        return try {
+            val plane = image.planes[0]
+            val pixelStride = plane.pixelStride
+            val rowPadding = plane.rowStride - pixelStride * image.width
+            val bmpW = image.width + rowPadding / pixelStride
+            val full = Bitmap.createBitmap(bmpW, image.height, Bitmap.Config.ARGB_8888)
+            plane.buffer.rewind()
+            full.copyPixelsFromBuffer(plane.buffer)
+            val cropped = if (bmpW != image.width) {
+                Bitmap.createBitmap(full, 0, 0, image.width, image.height).also { full.recycle() }
+            } else full
+            val scale = FRAME_WIDTH.toFloat() / image.width
+            val scaled = Bitmap.createScaledBitmap(
+                cropped, FRAME_WIDTH, (image.height * scale).roundToInt().coerceAtLeast(1), true
+            )
+            val baos = ByteArrayOutputStream()
+            scaled.compress(Bitmap.CompressFormat.JPEG, FRAME_QUALITY, baos)
+            if (scaled !== cropped) cropped.recycle()
+            scaled.recycle()
+            Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
+        } catch (e: Throwable) {
+            Log.w(TAG, "frame encode error: ${e.message}")
+            null
+        }
+    }
+
     private fun updateStatus(depthMs: Double, yoloMs: Double, detections: Int) {
         val now = System.nanoTime()
         if (lastFrameNs != 0L) {
@@ -259,6 +310,9 @@ class VisionPipeline(
         private const val DEPTH_SIZE = 518
         private const val YOLO_SIZE = 640
         private const val LIVE_CONF = 0.85f
+        private const val FRAME_WIDTH = 480
+        private const val FRAME_QUALITY = 50
+        private const val FRAME_MIN_INTERVAL_MS = 125L   // ~8 fps to the dashboard
 
         // Candidate asset names (Stream B ships depth.pte/yolo.pte; docs use longer names).
         private val DEPTH_ASSETS = listOf(

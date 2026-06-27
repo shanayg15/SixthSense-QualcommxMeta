@@ -70,6 +70,12 @@ class MainActivity : AppCompatActivity() {
         observeScene()
         observeVisionStatus()
         startDashboardSocket()
+        // The vision pipeline owns the camera; it streams the live S25 frame to the
+        // dashboard (only while a dashboard client is connected) and the voice agent
+        // forwards each interaction. One camera owner — no second CameraX binding.
+        AppGraph.visionPipeline.onFrame = { b64, rot -> socket?.pushFrame(b64, rot) }
+        AppGraph.visionPipeline.shouldStreamFrame = { socket?.hasClients() == true }
+        AppGraph.voiceAgent.onAnswer = { q, intent, a -> socket?.updateVoice(q, intent, a) }
     }
 
     private fun buildUi(): ScrollView {

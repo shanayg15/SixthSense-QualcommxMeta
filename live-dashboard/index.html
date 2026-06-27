@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SixthSense — Live Vision Dashboard</title>
+  <meta name="description" content="Deployable live-vision dashboard for the SixthSense on-device navigation copilot: the Galaxy S25 Ultra camera feed plus the on-device perception technologies, streamed live from the phone." />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- ============================ GLOBAL HEADER ============================ -->
+  <header class="appbar">
+    <div class="brand">
+      <span class="brand__mark" aria-hidden="true"></span>
+      <span class="brand__text">
+        <span class="brand__name">Sixth<b>Sense</b> · Live Vision</span>
+        <span class="brand__tag">On-device navigation copilot — the S25 Ultra camera &amp; the tech running on it</span>
+      </span>
+    </div>
+    <div class="statuses">
+      <span class="pill pill--offline" id="conn-pill"><span class="dot"></span><span data-bind="mode">OFFLINE</span></span>
+      <span class="pill pill--airplane" title="All perception runs locally on the phone; the demo runs in airplane mode.">AIRPLANE / ON-DEVICE</span>
+      <span class="pill pill--meta"><span data-bind="fps">0.0</span> fps</span>
+      <span class="pill pill--meta"><span data-bind="ms">0</span> ms/frame</span>
+    </div>
+  </header>
+
+  <!-- ============================== TOOLBAR =============================== -->
+  <div class="toolbar">
+    <div class="toolgroup">
+      <span class="field">
+        <label for="url-input">Device</label>
+        <input id="url-input" value="ws://192.168.1.50:8080" spellcheck="false" aria-label="Device WebSocket URL" />
+      </span>
+      <button class="btn btn--primary" id="btn-connect">Connect</button>
+      <span class="note-warn" id="mixed-warn" style="display:none">⚠ This page is HTTPS — use a <code class="k">wss://</code> device URL (browsers block <code class="k">ws://</code> from HTTPS).</span>
+    </div>
+    <div class="toolgroup">
+      <span class="btn-group">
+        <button class="btn" id="btn-collapse-all" title="Compress every panel">Collapse all</button>
+        <button class="btn" id="btn-expand-all" title="Expand every panel">Expand all</button>
+      </span>
+    </div>
+  </div>
+
+  <main>
+    <div class="grid">
+
+      <!-- ============================ CAMERA HERO ========================= -->
+      <div class="card col-8" data-card>
+        <button class="card__head" aria-expanded="true"><span class="chevron" aria-hidden="true">▾</span><span class="card__title">Camera — Galaxy S25 Ultra</span><span class="card__badge card__badge--blue">Live from device</span></button>
+        <div class="card__body">
+          <div class="canvas-wrap"><canvas id="cv-camera" role="img" aria-label="Live camera with perception overlays" width="1280" height="720"></canvas></div>
+          <div class="layerbar" id="layerbar" role="group" aria-label="Overlay layers">
+            <button class="layer-toggle" data-layer="detection" aria-pressed="true"><span class="sw"></span>Object detection</button>
+            <button class="layer-toggle" data-layer="depth"     aria-pressed="true"><span class="sw"></span>Depth sensing</button>
+            <button class="layer-toggle" data-layer="ocr"       aria-pressed="true"><span class="sw"></span>Text (OCR)</button>
+            <button class="layer-toggle" data-layer="path"      aria-pressed="true"><span class="sw"></span>Path guidance</button>
+            <button class="layer-toggle" data-layer="hud"       aria-pressed="true"><span class="sw"></span>HUD</button>
+          </div>
+          <div class="cam-caption">
+            <span>Galaxy S25 Ultra</span><span class="sep">|</span>
+            <span><b data-bind="camRes">—</b></span><span class="sep">|</span>
+            <span><b data-bind="fps">0.0</b> fps</span><span class="sep">|</span>
+            <span><b data-bind="ms">0</b> ms/frame</span><span class="sep">|</span>
+            <span>Camera frame &amp; overlays are streamed from the device's <code class="k">SceneState</code> — nothing is generated here.</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ======================== TECHNOLOGY STACK ======================== -->
+      <div class="card col-4" data-card>
+        <button class="card__head" aria-expanded="true"><span class="chevron" aria-hidden="true">▾</span><span class="card__title">On-device technology</span><span class="card__badge card__badge--green">ExecuTorch</span></button>
+        <div class="card__body">
+          <div id="tech-list"></div>
+          <p class="card__note">Lit = active right now, driven by the live <code>SceneState</code>. Everything runs locally on the Snapdragon&nbsp;8&nbsp;Elite (SM8750, Hexagon&nbsp;v79) via ExecuTorch with the Qualcomm&nbsp;QNN backend (XNNPACK CPU fallback) — no cloud, airplane mode.</p>
+        </div>
+      </div>
+
+      <!-- ============================== KPIs ============================== -->
+      <div class="card col-12" data-card>
+        <button class="card__head" aria-expanded="true"><span class="chevron" aria-hidden="true">▾</span><span class="card__title">Live readout</span></button>
+        <div class="card__body">
+          <div class="kpis">
+            <div class="kpi" data-kpi="path"><span class="kpi__label">Path ahead</span><span class="kpi__value" data-bind="pathClear">—</span><span class="kpi__sub">walkable corridor</span></div>
+            <div class="kpi" data-kpi="conf"><span class="kpi__label">Scene confidence</span><span class="kpi__value"><span data-bind="conf">—</span>%</span><span class="kpi__sub">perception certainty</span></div>
+            <div class="kpi"><span class="kpi__label">Objects in view</span><span class="kpi__value" data-bind="objCount">—</span><span class="kpi__sub">YOLO detections</span></div>
+            <div class="kpi"><span class="kpi__label">Detected text</span><span class="kpi__value" data-bind="ocr" style="font-size:18px">—</span><span class="kpi__sub">TrOCR, on demand</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ========================= DEPTH SENSING ========================= -->
+      <div class="card col-4" data-card>
+        <button class="card__head" aria-expanded="true"><span class="chevron" aria-hidden="true">▾</span><span class="card__title">Depth sensing</span><span class="card__badge">Depth-Anything-V2</span></button>
+        <div class="card__body">
+          <div class="zones">
+            <div class="zone" data-zone="left"><div class="zone__name">LEFT</div><div class="zone__track"><div class="zone__thresh"></div><div class="zone__fill"></div></div><div class="zone__val">—</div><div class="zone__tag"></div></div>
+            <div class="zone" data-zone="center"><div class="zone__name">CENTER</div><div class="zone__track"><div class="zone__thresh"></div><div class="zone__fill"></div></div><div class="zone__val">—</div><div class="zone__tag"></div></div>
+            <div class="zone" data-zone="right"><div class="zone__name">RIGHT</div><div class="zone__track"><div class="zone__thresh"></div><div class="zone__fill"></div></div><div class="zone__val">—</div><div class="zone__tag"></div></div>
+          </div>
+          <table class="data" style="margin-top:12px"><tbody>
+            <tr><td>Curb ahead</td><td class="mono" data-bind="curb">—</td></tr>
+            <tr><td>Step down</td><td class="mono" data-bind="step">—</td></tr>
+          </tbody></table>
+          <p class="card__note">Relative nearness per zone (0 far → 1 near). Dashed line = belt <code>NEAR_THRESHOLD&nbsp;0.55</code>.</p>
+        </div>
+      </div>
+
+      <!-- ======================= OBJECT DETECTION ======================== -->
+      <div class="card col-4" data-card>
+        <button class="card__head" aria-expanded="true"><span class="chevron" aria-hidden="true">▾</span><span class="card__title">Object detection</span><span class="card__badge">YOLOv11n / v8n</span></button>
+        <div class="card__body">
+          <table class="data"><thead><tr><th>Object</th><th>Zone</th><th>Near</th><th>Conf</th></tr></thead><tbody id="objects-tbody"></tbody></table>
+          <div class="empty" id="objects-empty">Waiting for device…</div>
+        </div>
+      </div>
+
+      <!-- ========================= HAPTIC OUTPUT ========================= -->
+      <div class="card col-4" data-card>
+        <button class="card__head" aria-expanded="true"><span class="chevron" aria-hidden="true">▾</span><span class="card__title">Haptic output</span><span class="card__badge card__badge--green">BLE belt</span></button>
+        <div class="card__body">
+          <div class="canvas-wrap" style="background:#fff"><canvas id="cv-belt" role="img" aria-label="Haptic belt command" width="520" height="220"></canvas></div>
+          <div class="belt-packet" data-belt-packet>
+            <span class="byte" data-byte="0">—<small>LEFT</small></span>
+            <span class="byte" data-byte="1">—<small>CENTER</small></span>
+            <span class="byte" data-byte="2">—<small>RIGHT</small></span>
+            <span class="byte" data-byte="3">—<small>PATTERN</small></span>
+          </div>
+          <p class="card__note" data-bind="beltPattern">awaiting device</p>
+        </div>
+      </div>
+
+      <!-- ========================== VOICE AGENT ========================== -->
+      <div class="card col-6" data-card>
+        <button class="card__head" aria-expanded="true"><span class="chevron" aria-hidden="true">▾</span><span class="card__title">Voice agent</span><span class="card__badge card__badge--blue">Whisper + Llama 3.2</span></button>
+        <div class="card__body">
+          <div class="voice-out">
+            <div class="voice-out__row"><span class="voice-out__k">Question</span><span id="voice-q">—</span></div>
+            <div class="voice-out__row"><span class="voice-out__k">Intent</span><span id="voice-intent">—</span></div>
+            <div class="voice-out__row"><span class="voice-out__k">Answer</span><span class="voice-answer" id="voice-answer">No voice events from the device yet.</span></div>
+          </div>
+          <p class="card__note">Push-to-talk on the phone: Whisper → intent → Llama&nbsp;3.2&nbsp;1B → offline TTS. The device emits each interaction (<code>scene.voice</code>) and it appears here.</p>
+        </div>
+      </div>
+
+      <!-- ========================== DATA FLOW ============================ -->
+      <div class="card col-6" data-card>
+        <button class="card__head" aria-expanded="true"><span class="chevron" aria-hidden="true">▾</span><span class="card__title">Pipeline — camera to outputs</span><span class="card__badge card__badge--green">On-device</span></button>
+        <div class="card__body"><div class="canvas-wrap" style="background:#fff"><canvas id="cv-flow" role="img" aria-label="Data flow: S25 camera to vision models to SceneState to belt, voice and dashboard" width="640" height="300"></canvas></div></div>
+      </div>
+
+      <!-- ============================== RAW ============================== -->
+      <div class="card col-12 card--collapsed" data-card>
+        <button class="card__head" aria-expanded="false"><span class="chevron" aria-hidden="true">▾</span><span class="card__title">Raw SceneState (wire format)</span></button>
+        <div class="card__body">
+          <div class="raw-toolbar"><button class="btn" id="btn-raw-pause">Pause</button><button class="btn" id="btn-raw-copy">Copy JSON</button></div>
+          <pre class="json" id="raw-json">// waiting for device…</pre>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <p class="footer">
+    SixthSense live vision dashboard — visualization only, no AI runs here. Connects to the phone at the address above and renders the device's live <code>SceneState</code> (camera frame, depth, objects, OCR, path, belt, voice). Auto-reconnects if the link drops.
+  </p>
+
+  <script src="app.js"></script>
+</body>
+</html>

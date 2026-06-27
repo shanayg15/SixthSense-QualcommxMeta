@@ -75,5 +75,6 @@ firmware/**/build/
 
 # ---- IDE / misc ----
 .vscode/
+.claude/
 *.log
 .tmp/

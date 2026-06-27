@@ -2,6 +2,7 @@ package com.sixthsense.ws
 
 import android.util.Log
 import com.google.gson.Gson
+import com.google.gson.JsonObject
 import com.sixthsense.core.SceneBus
 import java.net.InetSocketAddress
 import kotlinx.coroutines.CoroutineScope
@@ -28,14 +29,56 @@ class SceneSocket(
     private val gson = Gson()
     private var streamJob: Job? = null
 
+    // Latest camera frame (base64 JPEG) and voice event, merged into each
+    // broadcast so the dashboard renders the live S25 camera + voice with the
+    // SceneState. The core SceneState contract is unchanged.
+    @Volatile private var latestFrame: String? = null
+    @Volatile private var latestRotation: Int = 0
+    @Volatile private var latestVoice: JsonObject? = null
+
+    /** Build the outgoing JSON: SceneState + optional `frame`/`frameRotation` + optional `voice`. */
+    private fun currentJson(): String {
+        val obj = gson.toJsonTree(bus.state.value).asJsonObject
+        latestFrame?.let {
+            obj.addProperty("frame", it)
+            obj.addProperty("frameRotation", latestRotation)
+        }
+        latestVoice?.let { obj.add("voice", it) }
+        return gson.toJson(obj)
+    }
+
+    /** True when at least one dashboard client is connected. */
+    fun hasClients(): Boolean = connections.isNotEmpty()
+
+    /** Serialize + broadcast only when a dashboard is actually watching. */
+    private fun broadcastIfClients() {
+        if (connections.isNotEmpty()) broadcastSafe(currentJson())
+    }
+
+    /** Push a base64 JPEG camera frame (from [com.sixthsense.vision.VisionPipeline]). */
+    fun pushFrame(base64Jpeg: String, rotationDegrees: Int = 0) {
+        latestFrame = base64Jpeg
+        latestRotation = rotationDegrees
+        broadcastIfClients()
+    }
+
+    /** Push a voice interaction so the dashboard can show what the agent answered. */
+    fun updateVoice(question: String, intent: String, answer: String) {
+        latestVoice = JsonObject().apply {
+            addProperty("question", question)
+            addProperty("intent", intent)
+            addProperty("answer", answer)
+        }
+        broadcastIfClients()
+    }
+
     fun launch(scope: CoroutineScope) {
         try {
             isReuseAddr = true
             start() // non-blocking; spins up its own thread
             streamJob = scope.launch {
-                bus.state.collect { scene ->
-                    val json = gson.toJson(scene)
-                    broadcastSafe(json)
+                bus.state.collect {
+                    broadcastIfClients()
                 }
             }
             Log.i(TAG, "SceneSocket serving on port $port")
@@ -68,8 +111,8 @@ class SceneSocket(
 
     override fun onOpen(conn: WebSocket?, handshake: ClientHandshake?) {
         Log.i(TAG, "Dashboard connected: ${conn?.remoteSocketAddress}")
-        // Send the current scene immediately so the UI populates on connect.
-        conn?.send(gson.toJson(bus.state.value))
+        // Send the current scene (+ latest frame/voice) immediately so the UI populates on connect.
+        conn?.send(currentJson())
     }
 
     override fun onClose(conn: WebSocket?, code: Int, reason: String?, remote: Boolean) {
