@@ -13,6 +13,17 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+
+        // The Galaxy S25 Ultra is arm64-only; drop the dead x86_64 ExecuTorch .so
+        // and pre-align with the jniLibs/arm64-v8a layout the QNN .so libs need.
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+
+        // Active ExecuTorch backend, surfaced in the operator UI. The plain Maven
+        // executorch-android AAR is XNNPACK(CPU). When swapping in the QNN AAR for
+        // the Hexagon NPU build, change this to "qnn".
+        buildConfigField("String", "EXECUTORCH_BACKEND", "\"xnnpack\"")
     }
 
     buildTypes {
@@ -65,6 +76,22 @@ dependencies {
     // WebSocket server for the dashboard bridge
     implementation("org.java-websocket:Java-WebSocket:1.5.7")
 
-    // ExecuTorch runtime AAR is added later (see docs/model_export_plan.md):
-    //   implementation(files("libs/executorch.aar"))
+    // ExecuTorch on-device runtime.
+    // CPU / XNNPACK path (ship now): pure Maven; pulls fbjni + soloader transitively.
+    implementation("org.pytorch:executorch-android:1.3.1")
+
+    // Qualcomm QNN / Hexagon NPU path (drop-in later — see
+    // docs/ondevice_vision_and_phone_haptics.md). To switch:
+    //  1) download the prebuilt QNN AAR to android/app/libs/executorch-qnn-1.3.1.aar:
+    //     https://ossci-android.s3.amazonaws.com/executorch/release/1.3.1-qnn/executorch.aar
+    //  2) REMOVE the Maven line above (two libexecutorch.so would clash) and use:
+    //       implementation(files("libs/executorch-qnn-1.3.1.aar"))
+    //       implementation("com.facebook.fbjni:fbjni:0.7.0")        // not transitive from a local AAR
+    //       implementation("com.facebook.soloader:nativeloader:0.10.5")
+    //  3) bundle the Qualcomm QNN HTP runtime .so (libQnnHtp.so, the SM8750/Hexagon-v79
+    //     HTP skel, libQnnSystem.so, stubs) under src/main/jniLibs/arm64-v8a/
+    //  4) flip EXECUTORCH_BACKEND above to "qnn" and ship a QNN-exported .pte.
+
+    // Unit tests for the pure decoders + directional haptics encoding.
+    testImplementation("junit:junit:4.13.2")
 }

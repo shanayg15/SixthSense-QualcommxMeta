@@ -4,6 +4,10 @@
     <string name="title">SixthSense</string>
     <string name="subtitle">Operator / developer console (not the end-user UI)</string>
 
+    <string name="btn_start_vision">Start Live Vision (on-device)</string>
+    <string name="btn_stop_vision">Stop Live Vision</string>
+    <string name="btn_haptics_on">Phone Haptics Test Mode: ON</string>
+    <string name="btn_haptics_off">Phone Haptics Test Mode: OFF</string>
     <string name="btn_connect_belt">Connect Belt</string>
     <string name="btn_mock_on">Mock On</string>
     <string name="btn_mock_off">Mock Off</string>
@@ -12,5 +16,6 @@
     <string name="btn_test_right">Test Right</string>
     <string name="btn_ask">Ask What\'s Ahead</string>
 
+    <string name="vision_idle">vision: off — Start Live Vision or use Mock</string>
     <string name="scene_waiting">Waiting for SceneState…</string>
 </resources>

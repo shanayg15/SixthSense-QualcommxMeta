@@ -1,8 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Camera for the (future) live CameraX vision pipeline. -->
+    <!-- Camera for the live CameraX vision pipeline. -->
     <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- Phone's own vibration motor for the directional haptics test mode. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- INTERNET is for the LOCAL dashboard WebSocket only (no cloud). -->
     <uses-permission android:name="android.permission.INTERNET" />

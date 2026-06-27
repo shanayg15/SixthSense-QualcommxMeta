@@ -1,6 +1,7 @@
 package com.sixthsense
 
 import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -10,24 +11,32 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.view.PreviewView
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.gson.GsonBuilder
 import com.sixthsense.core.SceneState
 import com.sixthsense.debug.AppGraph
+import com.sixthsense.vision.VisionStatus
 import com.sixthsense.ws.SceneSocket
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 /**
  * Operator / developer console — NOT the end-user interface. The blind user is
- * guided by the belt and voice; this screen exists for development and the demo
- * operator (toggle mock, fire belt tests, watch the live SceneState).
+ * guided by the belt / phone haptics and voice; this screen exists for development
+ * and the demo operator (start live vision, toggle the phone-haptics test mode and
+ * mock, fire belt tests, watch the live SceneState + backend/latency/fps).
  */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var sceneView: TextView
+    private lateinit var statusView: TextView
+    private lateinit var previewView: PreviewView
+    private lateinit var hapticsButton: Button
     private var socket: SceneSocket? = null
     private val gson = GsonBuilder().setPrettyPrinting().create()
 
@@ -38,11 +47,19 @@ class MainActivity : AppCompatActivity() {
         AppGraph.beltClient.connect()
     }
 
+    private val requestCamera = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) startLiveVision()
+        else toast("Camera permission denied — live vision needs the camera.")
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         AppGraph.init(this)
         setContentView(buildUi())
         observeScene()
+        observeVisionStatus()
         startDashboardSocket()
     }
 
@@ -63,6 +80,22 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 0, 0, pad)
         })
 
+        // Operator camera preview (the blind user does not look at this).
+        previewView = PreviewView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                (240 * resources.displayMetrics.density).toInt(),
+            )
+        }
+        root.addView(previewView)
+
+        statusView = TextView(this).apply {
+            text = getString(R.string.vision_idle)
+            textSize = 12f
+            setPadding(0, pad / 2, 0, pad / 2)
+        }
+        root.addView(statusView)
+
         fun button(label: String, onClick: () -> Unit) = Button(this).apply {
             text = label
             layoutParams = LinearLayout.LayoutParams(
@@ -71,6 +104,13 @@ class MainActivity : AppCompatActivity() {
             )
             setOnClickListener { onClick() }
         }
+
+        root.addView(button(getString(R.string.btn_start_vision)) { connectCameraAndStart() })
+        root.addView(button(getString(R.string.btn_stop_vision)) {
+            AppGraph.visionPipeline.stop()
+        })
+        hapticsButton = button(getString(R.string.btn_haptics_off)) { togglePhoneHaptics() }
+        root.addView(hapticsButton)
 
         root.addView(button(getString(R.string.btn_connect_belt)) { connectBelt() })
         root.addView(button(getString(R.string.btn_mock_on)) {
@@ -91,6 +131,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(button(getString(R.string.btn_ask)) {
             val answer = AppGraph.voiceAgent.ask("what's ahead of me?")
             Log.i(TAG, "Voice answer: $answer")
+            toast(answer)
         })
 
         sceneView = TextView(this).apply {
@@ -102,6 +143,31 @@ class MainActivity : AppCompatActivity() {
         root.addView(sceneView)
 
         return ScrollView(this).apply { addView(root) }
+    }
+
+    private fun connectCameraAndStart() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+            == PackageManager.PERMISSION_GRANTED
+        ) {
+            startLiveVision()
+        } else {
+            requestCamera.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    private fun startLiveVision() {
+        AppGraph.visionPipeline.start(this, previewView)
+    }
+
+    private fun togglePhoneHaptics() {
+        val controller = AppGraph.phoneHaptics
+        val enable = !controller.isEnabled()
+        controller.setEnabled(enable)
+        hapticsButton.text =
+            getString(if (enable) R.string.btn_haptics_on else R.string.btn_haptics_off)
+        if (enable && !controller.hasVibrator()) {
+            toast("This device has no vibration motor.")
+        }
     }
 
     private fun connectBelt() {
@@ -122,9 +188,23 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun observeVisionStatus() {
+        lifecycleScope.launch {
+            AppGraph.visionPipeline.status.collectLatest { s -> statusView.text = renderStatus(s) }
+        }
+    }
+
+    private fun renderStatus(s: VisionStatus): String = buildString {
+        append("vision: ${if (s.running) "ON" else "off"}  backend=${s.backend}\n")
+        append("models: depth=${if (s.depthLoaded) "✓" else "—"}  yolo=${if (s.yoloLoaded) "✓" else "—"}\n")
+        append("fps=%.1f  depth=%.0fms  yolo=%.0fms\n".format(s.fps, s.depthMs, s.yoloMs))
+        append(s.note)
+    }
+
     private fun render(s: SceneState): String {
         val summary = buildString {
             append("mock=${AppGraph.mockSceneProducer.isEnabled()}  ")
+            append("haptics=${AppGraph.phoneHaptics.isEnabled()}  ")
             append("belt=${AppGraph.beltClient.isConnected}\n")
             append("zones L/C/R = %.2f / %.2f / %.2f\n".format(s.depth.left, s.depth.center, s.depth.right))
             append("pathClear=${s.pathClear}  conf=%.2f\n".format(s.conf))
@@ -139,8 +219,15 @@ class MainActivity : AppCompatActivity() {
         socket = SceneSocket(AppGraph.sceneBus).also { it.launch(AppGraph.scope) }
     }
 
+    private fun toast(msg: String) {
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+    }
+
     override fun onDestroy() {
         socket?.shutdown()
+        // CameraX unbinds with the lifecycle automatically; fully stop the pipeline
+        // (close models, free the executor's work) only when the app is finishing.
+        if (isFinishing) AppGraph.visionPipeline.stop()
         super.onDestroy()
     }
 

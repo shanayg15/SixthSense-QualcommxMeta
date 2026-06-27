@@ -15,6 +15,7 @@
                 <action android:name="com.sixthsense.DEBUG_BELT" />
                 <action android:name="com.sixthsense.DEBUG_MOCK" />
                 <action android:name="com.sixthsense.DEBUG_ASK" />
+                <action android:name="com.sixthsense.DEBUG_HAPTICS" />
             </intent-filter>
         </receiver>
     </application>
