@@ -1,0 +1,16 @@
+[project]
+name = "sixthsense-mcp"
+version = "0.1.0"
+description = "SixthSense development & debugging MCP server (dev-only, not part of the assistive runtime)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]",
+    "httpx",
+]
+
+[project.scripts]
+sixthsense-mcp = "sixthsense_mcp:main"
+
+[tool.uv]
+package = false
