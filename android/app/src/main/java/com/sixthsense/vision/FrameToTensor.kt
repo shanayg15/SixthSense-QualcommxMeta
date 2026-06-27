@@ -9,15 +9,39 @@ import org.pytorch.executorch.Tensor
 enum class Norm { IMAGENET, SCALE_0_1 }
 
 /**
- * Converts an RGBA_8888 [ImageProxy] into a normalized NCHW float [Tensor] for a
- * square ExecuTorch model input.
+ * Converts an RGBA_8888 [ImageProxy] into a single **upright, read-only** ARGB
+ * [Bitmap] (rotation applied, row-padding removed). Done ONCE per frame on the
+ * analyzer thread; the resulting bitmap is then shared with the depth + YOLO
+ * converters, which run on different threads. Reading a Bitmap from multiple
+ * threads is safe (pixel data is immutable on read), so the two models can build
+ * their tensors in parallel from this one bitmap with no race on the camera buffer.
+ */
+object FrameBitmap {
+    fun upright(image: ImageProxy): Bitmap {
+        val plane = image.planes[0]
+        val rowPadding = plane.rowStride - plane.pixelStride * image.width
+        val paddedWidth = image.width + rowPadding / plane.pixelStride
+        val raw = Bitmap.createBitmap(paddedWidth, image.height, Bitmap.Config.ARGB_8888)
+        plane.buffer.rewind()
+        raw.copyPixelsFromBuffer(plane.buffer)
+        val cropped = if (rowPadding == 0) raw
+        else Bitmap.createBitmap(raw, 0, 0, image.width, image.height)
+        val degrees = image.imageInfo.rotationDegrees
+        if (degrees == 0) return cropped
+        val m = Matrix().apply { postRotate(degrees.toFloat()) }
+        return Bitmap.createBitmap(cropped, 0, 0, cropped.width, cropped.height, m, true)
+    }
+}
+
+/**
+ * Builds a normalized NCHW float [Tensor] for a square ExecuTorch model input from
+ * a shared upright [Bitmap] (see [FrameBitmap]). ImageNet norm for Depth-Anything,
+ * 1/255 for YOLO.
  *
- * Handles: RGBA row padding, sensor [ImageProxy.imageInfo].rotationDegrees, a plain
- * square resize (stretch — keeps box<->depth coordinate mapping a simple ratio, see
- * [SceneAssembler]), RGB channel order, and per-channel normalization
- * (ImageNet for Depth-Anything, 1/255 for YOLO).
- *
- * NOT thread-safe: reuses internal buffers, so use one instance per analyzer thread.
+ * NOT thread-safe within a single instance (reuses [pixels]/[chw]) — use one
+ * instance per analyzer thread. Two DIFFERENT instances (depth, yolo) may call
+ * [toTensor] on the SAME source bitmap concurrently: each owns its buffers and only
+ * READS the bitmap, so that is safe.
  *
  * @param size model input side (518 for depth, 640 for YOLO).
  */
@@ -27,16 +51,15 @@ class FrameToTensor(private val size: Int, private val norm: Norm) {
     private val std = floatArrayOf(0.229f, 0.224f, 0.225f)
     private val pixels = IntArray(size * size)
     private val shape = longArrayOf(1, 3, size.toLong(), size.toLong())
-    // Reused CHW float buffer. Tensor.fromBlob(float[], long[]) copies into its own
-    // native buffer, so reusing this array across frames is safe (one thread).
     private val chw = FloatArray(3 * size * size)
 
-    fun toTensor(image: ImageProxy): Tensor {
-        val square = squareResize(rotate(imageProxyToBitmap(image), image.imageInfo.rotationDegrees))
+    fun toTensor(src: Bitmap): Tensor {
+        val square = if (src.width == size && src.height == size) src
+        else Bitmap.createScaledBitmap(src, size, size, true)
         square.getPixels(pixels, 0, size, 0, 0, size, size)
+        if (square !== src) square.recycle()
 
         val area = size * size
-        // CHW: R plane [0,area), G plane [area,2area), B plane [2area,3area).
         for (i in 0 until area) {
             val p = pixels[i]
             val r = ((p shr 16) and 0xFF) / 255f
@@ -54,27 +77,4 @@ class FrameToTensor(private val size: Int, private val norm: Norm) {
         }
         return Tensor.fromBlob(chw, shape)
     }
-
-    /** RGBA_8888 -> ARGB Bitmap, accounting for right-edge row padding. */
-    private fun imageProxyToBitmap(image: ImageProxy): Bitmap {
-        val plane = image.planes[0]
-        val buffer = plane.buffer
-        val rowPadding = plane.rowStride - plane.pixelStride * image.width
-        val paddedWidth = image.width + rowPadding / plane.pixelStride
-        val bmp = Bitmap.createBitmap(paddedWidth, image.height, Bitmap.Config.ARGB_8888)
-        buffer.rewind()
-        bmp.copyPixelsFromBuffer(buffer)
-        return if (rowPadding == 0) bmp
-        else Bitmap.createBitmap(bmp, 0, 0, image.width, image.height)
-    }
-
-    private fun rotate(src: Bitmap, degrees: Int): Bitmap {
-        if (degrees == 0) return src
-        val m = Matrix().apply { postRotate(degrees.toFloat()) }
-        return Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, true)
-    }
-
-    private fun squareResize(src: Bitmap): Bitmap =
-        if (src.width == size && src.height == size) src
-        else Bitmap.createScaledBitmap(src, size, size, true)
 }
