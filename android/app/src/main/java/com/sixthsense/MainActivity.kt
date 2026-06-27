@@ -165,9 +165,13 @@ class MainActivity : AppCompatActivity() {
             AppGraph.beltClient.send(byteArrayOf(0, 0, 200.toByte(), 0))
         })
         root.addView(button(getString(R.string.btn_ask)) {
-            val answer = AppGraph.voiceAgent.ask("what's ahead of me?")
-            Log.i(TAG, "Voice answer: $answer")
-            toast(answer)
+            // Uses the on-device Qwen LLM when ready (falls back to rule-based);
+            // generation runs off-thread, so toast the answer when it returns.
+            toast(if (AppGraph.llmEngine.isReady) "Asking Qwen…" else "Answering…")
+            AppGraph.voiceAgent.askAsync("what's ahead of me?") { answer ->
+                Log.i(TAG, "Voice answer: $answer")
+                runOnUiThread { toast(answer) }
+            }
         })
 
         sceneView = TextView(this).apply {

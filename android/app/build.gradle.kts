@@ -57,6 +57,11 @@ android {
     buildFeatures {
         buildConfig = true
     }
+
+    // Keep the ~400MB Qwen .pte uncompressed so it copies/loads fast from assets.
+    androidResources {
+        noCompress += "pte"
+    }
 }
 
 dependencies {

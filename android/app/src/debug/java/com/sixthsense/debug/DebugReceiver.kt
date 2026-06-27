@@ -52,8 +52,11 @@ class DebugReceiver : BroadcastReceiver() {
             ACTION_ASK -> {
                 val q = intent.getStringExtra("q") ?: "what's ahead of me?"
                 Log.i(TAG, "DEBUG_ASK q=\"$q\"")
-                val answer = AppGraph.voiceAgent.ask(q)
-                Log.i(TAG, "DEBUG_ASK answer=\"$answer\"")
+                // Route through askAsync so the on-device Qwen LLM answers (off-thread);
+                // falls back to the rule-based answer if the LLM isn't ready.
+                AppGraph.voiceAgent.askAsync(q) { answer ->
+                    Log.i(TAG, "DEBUG_ASK answer=\"$answer\"")
+                }
             }
 
             else -> Log.w(TAG, "Unknown action: ${intent.action}")

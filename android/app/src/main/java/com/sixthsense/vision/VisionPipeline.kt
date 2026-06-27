@@ -157,7 +157,7 @@ class VisionPipeline(
                 cameraProvider = provider
 
                 val preview = previewView?.let { pv ->
-                    Preview.Builder().build().also { it.surfaceProvider = pv.surfaceProvider }
+                    Preview.Builder().build().also { it.setSurfaceProvider(pv.surfaceProvider) }
                 }
                 val analysis = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)

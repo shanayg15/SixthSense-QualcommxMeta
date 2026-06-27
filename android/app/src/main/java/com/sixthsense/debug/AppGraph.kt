@@ -7,10 +7,12 @@ import com.sixthsense.core.SceneBus
 import com.sixthsense.haptics.PhoneHapticsActuator
 import com.sixthsense.haptics.PhoneHapticsController
 import com.sixthsense.vision.VisionPipeline
+import com.sixthsense.voice.LlmEngine
 import com.sixthsense.voice.VoiceAgent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * Tiny manual service locator that holds the long-lived app components. Avoids a
@@ -27,6 +29,8 @@ object AppGraph {
     lateinit var beltClient: BeltClient
         private set
     lateinit var voiceAgent: VoiceAgent
+        private set
+    lateinit var llmEngine: LlmEngine
         private set
     lateinit var visionPipeline: VisionPipeline
         private set
@@ -46,9 +50,13 @@ object AppGraph {
         sceneBus = SceneBus()
         beltClient = BeltClient(app)
         mockSceneProducer = MockSceneProducer(sceneBus, scope)
-        voiceAgent = VoiceAgent(sceneBus)
+        llmEngine = LlmEngine(app)
+        voiceAgent = VoiceAgent(sceneBus, llmEngine)
         visionPipeline = VisionPipeline(app, sceneBus)
         phoneHaptics = PhoneHapticsController(sceneBus, PhoneHapticsActuator(app), scope)
         initialized = true
+        // Load the on-device Qwen LLM off the main thread (fast no-op if qwen.pte
+        // isn't bundled; the voice agent uses rule-based answers until it's ready).
+        scope.launch { llmEngine.load() }
     }
 }
