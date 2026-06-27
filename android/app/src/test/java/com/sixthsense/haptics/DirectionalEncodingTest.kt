@@ -22,28 +22,37 @@ class DirectionalEncodingTest {
         assertNull(DirectionalEncoding.encode(listOf(0, 0, 0, 1)))
     }
 
+    /** Number of vibrating (amplitude>0) segments = pulse count per cycle. */
+    private fun pulseCount(sig: DirectionalEncoding.HapticSignature) =
+        sig.amplitudes.count { it > 0 }
+
     @Test
-    fun left_dominant_is_left_short_then_long() {
+    fun left_dominant_is_one_pulse() {
         val sig = DirectionalEncoding.encode(listOf(200, 0, 0, 0))!!
         assertEquals(Direction.LEFT, sig.direction)
-        // short pip then long buzz: timings = [gap, SHORT, midgap, LONG]
-        assertEquals(4, sig.timings.size)
-        assertTrue("short before long", sig.timings[1] < sig.timings[3])
+        assertEquals(1, pulseCount(sig))   // L = 1 tap
     }
 
     @Test
-    fun right_dominant_is_mirror_of_left() {
-        val sig = DirectionalEncoding.encode(listOf(0, 0, 200, 0))!!
-        assertEquals(Direction.RIGHT, sig.direction)
-        // long buzz then short pip: mirror of LEFT
-        assertTrue("long before short", sig.timings[1] > sig.timings[3])
-    }
-
-    @Test
-    fun center_dominant_is_single_steady_block() {
+    fun center_dominant_is_two_pulses() {
         val sig = DirectionalEncoding.encode(listOf(0, 200, 0, 0))!!
         assertEquals(Direction.CENTER, sig.direction)
-        assertEquals(2, sig.timings.size) // [gap, steady]
+        assertEquals(2, pulseCount(sig))   // C = 2 taps
+    }
+
+    @Test
+    fun right_dominant_is_three_pulses() {
+        val sig = DirectionalEncoding.encode(listOf(0, 0, 200, 0))!!
+        assertEquals(Direction.RIGHT, sig.direction)
+        assertEquals(3, pulseCount(sig))   // R = 3 taps
+    }
+
+    @Test
+    fun pulse_count_strictly_increases_left_center_right() {
+        val l = pulseCount(DirectionalEncoding.encode(listOf(200, 0, 0, 0))!!)
+        val c = pulseCount(DirectionalEncoding.encode(listOf(0, 200, 0, 0))!!)
+        val r = pulseCount(DirectionalEncoding.encode(listOf(0, 0, 200, 0))!!)
+        assertTrue("L<C<R pulse counts ($l,$c,$r)", l < c && c < r)
     }
 
     @Test

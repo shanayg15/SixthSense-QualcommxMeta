@@ -8,6 +8,7 @@ import android.util.Log
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -20,8 +21,10 @@ import androidx.lifecycle.lifecycleScope
 import com.google.gson.GsonBuilder
 import com.sixthsense.core.SceneState
 import com.sixthsense.debug.AppGraph
+import com.sixthsense.vision.DetectionOverlayView
 import com.sixthsense.vision.VisionStatus
 import com.sixthsense.ws.SceneSocket
+import kotlin.math.max
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
@@ -36,6 +39,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sceneView: TextView
     private lateinit var statusView: TextView
     private lateinit var previewView: PreviewView
+    private lateinit var overlay: DetectionOverlayView
     private lateinit var hapticsButton: Button
     private lateinit var testRunButton: Button
     private var testRunActive = false
@@ -95,14 +99,25 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 0, 0, pad)
         })
 
-        // Operator camera preview (the blind user does not look at this).
+        // Operator camera preview + AR detection overlay (the blind user does not look
+        // at this). The overlay draws detection boxes on top of the live camera.
+        val camHeight = (240 * resources.displayMetrics.density).toInt()
+        val camContainer = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, camHeight)
+        }
         previewView = PreviewView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                (240 * resources.displayMetrics.density).toInt(),
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
             )
         }
-        root.addView(previewView)
+        overlay = DetectionOverlayView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+        }
+        camContainer.addView(previewView)
+        camContainer.addView(overlay)   // overlay sits on top of the preview
+        root.addView(camContainer)
 
         statusView = TextView(this).apply {
             text = getString(R.string.vision_idle)
@@ -237,8 +252,29 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             AppGraph.sceneBus.state.collectLatest { scene ->
                 sceneView.text = render(scene)
+                overlay.setDetections(scene.objects)
+                // A "red" (too-close) object fires a directional phone buzz. Skipped when
+                // the full test-mode controller is already driving the motor from the bus.
+                if (!AppGraph.phoneHaptics.isEnabled()) {
+                    AppGraph.phoneHaptics.driveOnce(proximityPacket(scene))
+                }
             }
         }
+    }
+
+    /** Belt packet built only from RED (too-close) detections, so only they buzz. */
+    private fun proximityPacket(s: SceneState): List<Int> {
+        var l = 0; var c = 0; var r = 0
+        for (o in s.objects) {
+            if (o.nearness < DetectionOverlayView.RED_THRESHOLD) continue
+            val i = (o.nearness * 255).toInt().coerceIn(0, 255)
+            when (o.zone) {
+                "left" -> l = max(l, i)
+                "right" -> r = max(r, i)
+                else -> c = max(c, i)
+            }
+        }
+        return listOf(l, c, r, 0)
     }
 
     private fun observeVisionStatus() {

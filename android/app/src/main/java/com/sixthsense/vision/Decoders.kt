@@ -1,5 +1,6 @@
 package com.sixthsense.vision
 
+import com.sixthsense.core.BoundingBox
 import com.sixthsense.core.DepthZones
 import com.sixthsense.core.DetectedObj
 import kotlin.math.abs
@@ -63,9 +64,9 @@ object YoloDecoder {
         iouThresh: Float = 0.45f,
         numAnchors: Int = ANCHORS_640,
     ): List<RawDet> {
-        require(out.size >= ATTRS * numAnchors) {
-            "YOLO output too small: ${out.size} < ${ATTRS * numAnchors}"
-        }
+        // Wrong-shape output -> no detections (don't crash the analyzer); the pipeline
+        // logs the actual output size so a layout mismatch is debuggable.
+        if (out.size < ATTRS * numAnchors) return emptyList()
         val kept = ArrayList<RawDet>()
         // Channel-major: value(attr, anchor) = flat[attr * numAnchors + anchor].
         for (a in 0 until numAnchors) {
@@ -268,8 +269,18 @@ object SceneAssembler {
                 zone = YoloDecoder.zoneForCenterX(cx, yoloInput),
                 nearness = nearness,
                 conf = d.score,
+                box = normBox(d, yoloInput),
             )
         }
+    }
+
+    /** Normalized [0,1] box (for the AR overlay) from an input-space detection. */
+    private fun normBox(d: RawDet, inputSize: Int): BoundingBox {
+        val s = inputSize.toFloat()
+        return BoundingBox(
+            x1 = (d.x1 / s).coerceIn(0f, 1f), y1 = (d.y1 / s).coerceIn(0f, 1f),
+            x2 = (d.x2 / s).coerceIn(0f, 1f), y2 = (d.y2 / s).coerceIn(0f, 1f),
+        )
     }
 
     /** Box-area fraction at which a detection counts as "very near" (1.0). Tune on device. */
@@ -292,6 +303,7 @@ object SceneAssembler {
                 zone = YoloDecoder.zoneForCenterX(cx, yoloInput),
                 nearness = nearness,
                 conf = d.score,
+                box = normBox(d, yoloInput),
             )
         }
     }

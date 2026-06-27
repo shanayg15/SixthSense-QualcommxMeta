@@ -65,6 +65,7 @@ class VisionPipeline(
     @Volatile private var yoloModule: EtModule? = null
     @Volatile private var running = false
     @Volatile private var modelsRequested = false
+    @Volatile private var loggedYolo = false
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var lastFrameNs = 0L
@@ -207,6 +208,17 @@ class VisionPipeline(
                 val t1 = System.nanoTime()
                 val yoloOut = yolo.forward(yoloConv.toTensor(image))
                 yoloMs = (System.nanoTime() - t1) / 1_000_000.0
+                // One-time diagnostic to debug detection: confirms the output shape and
+                // that scores look sane (if max≈0, the input scaling/model is wrong).
+                if (!loggedYolo) {
+                    loggedYolo = true
+                    val expected = YoloDecoder.ATTRS * YoloDecoder.ANCHORS_640
+                    val maxScore = yoloOut.data.let { d ->
+                        var m = 0f; val start = 4 * YoloDecoder.ANCHORS_640
+                        var i = start; while (i < d.size) { if (d[i] > m) m = d[i]; i++ }; m
+                    }
+                    Log.i(TAG, "YOLO out size=${yoloOut.data.size} (expect $expected) maxScore=$maxScore")
+                }
                 val dets = YoloDecoder.decode(yoloOut.data, inputSize = YOLO_SIZE)
                 objects = if (depthData != null)
                     SceneAssembler.toDetectedObjects(dets, depthData, dw, dh, YOLO_SIZE)

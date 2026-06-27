@@ -25,7 +25,13 @@ class PhoneHapticsActuator(context: Context) {
     private val vibrator: Vibrator = resolveVibrator(context.applicationContext)
     private val amplitudeControl: Boolean = runCatching { vibrator.hasAmplitudeControl() }.getOrDefault(false)
 
-    /** Last packet armed, so identical consecutive packets don't restart the loop each frame. */
+    /**
+     * Coarse signature of what's currently playing: direction + an amplitude bucket.
+     * We re-arm ONLY when this changes — NOT on every raw L/C/R jitter. Keying on the
+     * raw packet (the old bug) re-armed the looping waveform every camera frame, so its
+     * directional rhythm never played and all directions felt identical. Keying on the
+     * direction lets a persistent direction's pulse pattern actually loop and be felt.
+     */
     @Volatile
     private var lastKey: String? = null
 
@@ -33,43 +39,45 @@ class PhoneHapticsActuator(context: Context) {
 
     /** Drive the motor from a belt packet `[L, C, R, pattern]`. */
     fun onBeltPacket(packet: List<Int>) {
-        val l = packet.getOrElse(0) { 0 }
-        val c = packet.getOrElse(1) { 0 }
-        val r = packet.getOrElse(2) { 0 }
-        val pattern = packet.getOrElse(3) { 0 }
-
-        val key = "$l,$c,$r,$pattern"
-        if (key == lastKey) return
-        lastKey = key
-
-        val sig = DirectionalEncoding.encode(l, c, r, pattern)
+        val sig = DirectionalEncoding.encode(
+            packet.getOrElse(0) { 0 }, packet.getOrElse(1) { 0 },
+            packet.getOrElse(2) { 0 }, packet.getOrElse(3) { 0 },
+        )
         if (sig == null) {
             stop()
             return
         }
+        // Re-arm only on a meaningful change (direction, or a coarse intensity bucket).
+        val maxAmp = sig.amplitudes.maxOrNull() ?: 0
+        val key = "${sig.direction}|${maxAmp / AMP_BUCKET}"
+        if (key == lastKey) return
+        lastKey = key
+
         val effect =
             if (amplitudeControl) VibrationEffect.createWaveform(sig.timings, sig.amplitudes, sig.repeat)
             // No amplitude control: the timings already encode the same off/on rhythm
-            // (amplitudes are 0 exactly on the off-segments). DirectionalEncoding always
-            // emits repeat=0, so this two-arg overload reproduces the full looping signature.
+            // (amplitudes are 0 exactly on the off-segments); repeat is always 0.
             else VibrationEffect.createWaveform(sig.timings, sig.repeat)
         try {
-            vibrator.cancel()           // "update" = cancel + re-arm (no live-amplitude API)
+            vibrator.cancel()           // re-arm: cancel + re-vibrate (no live-amplitude API)
             vibrator.vibrate(effect)
-            Log.i(TAG, "Phone haptics: ${sig.direction} amp<=${sig.amplitudes.maxOrNull()} packet=$key")
+            Log.i(TAG, "Phone haptics: ${sig.direction} amp<=$maxAmp key=$key")
         } catch (e: Throwable) {
             Log.w(TAG, "vibrate() failed: ${e.message}")
         }
     }
 
-    /** Stop any ongoing buzz (test mode off / path clear). */
+    /** Stop any ongoing buzz (test mode off / path clear). Idempotent. */
     fun stop() {
+        if (lastKey == null) return
         lastKey = null
         runCatching { vibrator.cancel() }
     }
 
     companion object {
         private const val TAG = "SixthSenseMCP"
+        /** Amplitude bucket width: intensity must change by this much to re-arm (avoids jitter churn). */
+        private const val AMP_BUCKET = 85
 
         private fun resolveVibrator(ctx: Context): Vibrator =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) api31Vibrator(ctx)

@@ -16,12 +16,23 @@ data class DepthZones(
     val stepDown: Boolean = false,
 )
 
+/**
+ * Normalized bounding box in [0,1] of the upright (rotated, square model-input)
+ * frame: (0,0) = top-left, (1,1) = bottom-right. Used by the AR overlay to draw the
+ * box on the live camera view. Optional — null when a producer doesn't supply it.
+ */
+data class BoundingBox(
+    val x1: Float, val y1: Float, val x2: Float, val y2: Float,
+)
+
 /** A detected object placed in a zone ("left" | "center" | "right"). */
 data class DetectedObj(
     val label: String,
     val zone: String,
     val nearness: Float,
     val conf: Float,
+    /** Normalized screen box for the AR overlay (null if unknown). */
+    val box: BoundingBox? = null,
 )
 
 /** On-demand OCR result (only populated when the user asks to read text). */

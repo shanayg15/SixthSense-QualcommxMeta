@@ -8,17 +8,19 @@ import kotlin.math.max
  * Android-free so the directional encoding is unit-testable on the JVM.
  *
  * A phone has ONE actuator (no true spatial left/right), so direction is encoded
- * TEMPORALLY by rhythm, with the dominant zone (max of L/C/R) chosen per update:
- *   LEFT    = short pip -> long buzz   (rising, "leans left")
- *   RIGHT   = long buzz -> short pip   (mirror of LEFT)
- *   CENTER  = one steady block
- *   CURB    = hard triple thump at full amplitude (pattern 2, overrides direction)
- *   CAUTION = single soft pulse, NO direction (pattern 1 / low confidence)
+ * TEMPORALLY by PULSE COUNT (far easier to feel on one motor than short-vs-long),
+ * with the dominant zone (max of L/C/R) chosen per update:
+ *   LEFT    = 1 pulse  per cycle   (· … · … ·)
+ *   CENTER  = 2 pulses per cycle   (·· … ··)
+ *   RIGHT   = 3 pulses per cycle   (··· … ···)
+ *   CURB    = 2 hard long buzzes at full amplitude (pattern 2, overrides direction)
+ *   CAUTION = 1 soft pulse, NO direction (pattern 1 / low confidence)
  *
- * Intensity rides on amplitude (with a perceptible floor, since it's felt through
- * clothing at the waist). The timings arrays always start with an OFF (silence)
- * segment and alternate off/on, so a device WITHOUT amplitude control can replay
- * the exact same rhythm from the timings alone (see [PhoneHapticsActuator]).
+ * A long CYCLE_GAP separates repeats so the pulses are countable, and the whole
+ * signature loops (repeat=0). Intensity rides on amplitude (with a perceptible
+ * floor — felt through clothing at the waist). Timings always start with an OFF
+ * (silence) segment and alternate off/on, so a device WITHOUT amplitude control
+ * replays the same rhythm from the timings alone (see [PhoneHapticsActuator]).
  */
 object DirectionalEncoding {
 
@@ -41,14 +43,12 @@ object DirectionalEncoding {
     const val MIN_PERCEPTIBLE = 60
 
     // Rhythm timings (ms).
-    private const val GAP = 90L      // silence before the signature repeats
-    private const val SHORT = 70L
-    private const val LONG = 230L
-    private const val MID_GAP = 60L  // gap between the two pips of L/R
-    private const val CENTER_MS = 300L
-    private const val CURB_ON = 120L
-    private const val CURB_GAP = 70L
-    private const val CAUTION_MS = 110L
+    private const val CYCLE_GAP = 350L   // long rest between repeats -> pulses are countable
+    private const val PULSE = 90L        // one tap
+    private const val PULSE_GAP = 90L    // off between taps within a cycle
+    private const val CURB_ON = 200L     // hard long buzz
+    private const val CURB_GAP = 120L
+    private const val CAUTION_MS = 150L
 
     /** 0..255 zone intensity -> legal 1..255 amplitude with a perceptible floor. */
     fun toAmplitude(intensity: Int): Int {
@@ -85,41 +85,40 @@ object DirectionalEncoding {
         if (pat == 1) {
             return HapticSignature(
                 Direction.CAUTION,
-                longArrayOf(GAP, CAUTION_MS),
+                longArrayOf(CYCLE_GAP, CAUTION_MS),
                 intArrayOf(0, softAmplitude(amp)),
                 repeat = 0,
             )
         }
-        // Curb / step (pattern 2): unmistakable hard triple thump, overrides direction.
+        // Curb / step (pattern 2): unmistakable two hard long buzzes, overrides direction.
         if (pat == 2) {
             return HapticSignature(
                 Direction.CURB,
-                longArrayOf(GAP, CURB_ON, CURB_GAP, CURB_ON, CURB_GAP, CURB_ON),
-                intArrayOf(0, MAX_AMPLITUDE, 0, MAX_AMPLITUDE, 0, MAX_AMPLITUDE),
+                longArrayOf(CYCLE_GAP, CURB_ON, CURB_GAP, CURB_ON),
+                intArrayOf(0, MAX_AMPLITUDE, 0, MAX_AMPLITUDE),
                 repeat = 0,
             )
         }
 
-        // Dominant zone -> direction. Ties resolve left, then right, then center.
+        // Dominant zone -> direction, encoded as a PULSE COUNT (L=1, C=2, R=3).
+        // Ties resolve left, then right, then center.
         return when (maxIntensity) {
-            li -> HapticSignature(
-                Direction.LEFT,
-                longArrayOf(GAP, SHORT, MID_GAP, LONG),
-                intArrayOf(0, amp, 0, amp),
-                repeat = 0,
-            )
-            ri -> HapticSignature(
-                Direction.RIGHT,
-                longArrayOf(GAP, LONG, MID_GAP, SHORT),
-                intArrayOf(0, amp, 0, amp),
-                repeat = 0,
-            )
-            else -> HapticSignature(
-                Direction.CENTER,
-                longArrayOf(GAP, CENTER_MS),
-                intArrayOf(0, amp),
-                repeat = 0,
-            )
+            li -> pulseSignature(Direction.LEFT, 1, amp)
+            ri -> pulseSignature(Direction.RIGHT, 3, amp)
+            else -> pulseSignature(Direction.CENTER, 2, amp)
         }
+    }
+
+    /** A cycle of [count] equal taps at [amp], a long rest, then looping. */
+    private fun pulseSignature(direction: Direction, count: Int, amp: Int): HapticSignature {
+        // [CYCLE_GAP, PULSE, PULSE_GAP, PULSE, ...]  -> 'count' on-segments per cycle.
+        val timings = ArrayList<Long>(1 + count * 2)
+        val amps = ArrayList<Int>(1 + count * 2)
+        timings.add(CYCLE_GAP); amps.add(0)            // leading rest (off)
+        for (i in 0 until count) {
+            timings.add(PULSE); amps.add(amp)          // on
+            if (i < count - 1) { timings.add(PULSE_GAP); amps.add(0) }  // off between taps
+        }
+        return HapticSignature(direction, timings.toLongArray(), amps.toIntArray(), repeat = 0)
     }
 }
