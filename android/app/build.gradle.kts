@@ -3,13 +3,6 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// Backend selector. Default = XNNPACK (CPU): pure Maven, always builds.
-// Qualcomm QNN / Hexagon NPU: build with -PuseQnn=true after running
-// scripts/setup_qnn_backend.sh (downloads the QNN AAR) and placing the QNN HTP
-// runtime .so under app/src/main/jniLibs/arm64-v8a/. See
-// docs/ondevice_vision_and_phone_haptics.md.
-val useQnn = (project.findProperty("useQnn") as String?)?.toBoolean() ?: false
-
 android {
     namespace = "com.sixthsense"
     compileSdk = 35
@@ -21,14 +14,17 @@ android {
         versionCode = 1
         versionName = "0.1.0"
 
-        // The Galaxy S25 Ultra is arm64-only; drop the dead x86_64 ExecuTorch .so
-        // and pre-align with the jniLibs/arm64-v8a layout the QNN .so libs need.
+        // The Galaxy S25 Ultra is arm64-only; drops dead x86_64 libs and matches the
+        // jniLibs/arm64-v8a layout the Qualcomm NPU .so libs need.
         ndk {
             abiFilters += "arm64-v8a"
         }
 
-        // Active ExecuTorch backend, surfaced in the operator UI. Driven by -PuseQnn.
-        buildConfigField("String", "EXECUTORCH_BACKEND", if (useQnn) "\"qnn\"" else "\"xnnpack\"")
+        // CV backend (Qualcomm AI Hub LiteRT, NPU→GPU→CPU) surfaced in the operator UI;
+        // the live value is refined to litert/npu|gpu|cpu at model load.
+        buildConfigField("String", "CV_BACKEND", "\"litert-aihub\"")
+        // The on-device LLM stays on ExecuTorch (XNNPACK).
+        buildConfigField("String", "EXECUTORCH_BACKEND", "\"xnnpack\"")
     }
 
     buildTypes {
@@ -81,21 +77,17 @@ dependencies {
     // WebSocket server for the dashboard bridge
     implementation("org.java-websocket:Java-WebSocket:1.5.7")
 
-    // ExecuTorch on-device runtime — backend chosen by -PuseQnn (see top of file).
-    if (useQnn) {
-        // Qualcomm QNN / Hexagon NPU. Requires: scripts/setup_qnn_backend.sh (downloads
-        // app/libs/executorch-qnn-1.3.1.aar) AND the QNN HTP runtime .so (libQnnHtp.so,
-        // the SM8750/Hexagon-v79 HTP skel, libQnnSystem.so, stubs) in
-        // src/main/jniLibs/arm64-v8a/, AND a QNN-exported .pte. fbjni/soloader are not
-        // transitive from a local AAR, so add them explicitly.
-        implementation(files("libs/executorch-qnn-1.3.1.aar"))
-        implementation("com.facebook.fbjni:fbjni:0.7.0")
-        implementation("com.facebook.soloader:nativeloader:0.10.5")
-    } else {
-        // CPU / XNNPACK (default): pure Maven; pulls fbjni + soloader transitively.
-        implementation("org.pytorch:executorch-android:1.3.1")
-    }
+    // CV backend: Qualcomm AI Hub models via LiteRT (CompiledModel, NPU→GPU→CPU).
+    // For Hexagon NPU acceleration, ship the Qualcomm AI Engine Direct / QNN HTP
+    // runtime .so (libQnnHtp.so, libQnnHtpV79Skel.so for SM8750, libQnnSystem.so)
+    // in src/main/jniLibs/arm64-v8a/ (from litert_npu_runtime_libraries.zip or the
+    // QNN SDK); without them LiteRT falls back to GPU/CPU and the app still runs.
+    implementation("com.google.ai.edge.litert:litert:2.1.0")
 
-    // Unit tests for the pure decoders + directional haptics encoding.
+    // On-device LLM (voice agent) hosted with ExecuTorch — LlmModule is inside this
+    // single AAR (XNNPACK); pulls fbjni/soloader/core-ktx transitively.
+    implementation("org.pytorch:executorch-android:1.3.1")
+
+    // JVM unit tests for the pure decoders + directional haptics encoding.
     testImplementation("junit:junit:4.13.2")
 }

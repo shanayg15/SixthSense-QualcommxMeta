@@ -150,9 +150,13 @@ class MainActivity : AppCompatActivity() {
             AppGraph.beltClient.send(byteArrayOf(0, 0, 200.toByte(), 0))
         })
         root.addView(button(getString(R.string.btn_ask)) {
-            val answer = AppGraph.voiceAgent.ask("what's ahead of me?")
-            Log.i(TAG, "Voice answer: $answer")
-            toast(answer)
+            // askAsync uses the on-device ExecuTorch LLM when ready (falls back to the
+            // rule-based answer); onResult arrives on a worker thread.
+            toast("Thinking…")
+            AppGraph.voiceAgent.askAsync("what's ahead of me?") { answer ->
+                Log.i(TAG, "Voice answer: $answer")
+                runOnUiThread { toast(answer) }
+            }
         })
 
         sceneView = TextView(this).apply {
@@ -278,9 +282,14 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         socket?.shutdown()
-        // CameraX unbinds with the lifecycle automatically; fully stop the pipeline
-        // (close models, free the executor's work) only when the app is finishing.
-        if (isFinishing) AppGraph.visionPipeline.stop()
+        // CameraX unbinds with the lifecycle automatically; fully release the
+        // pipeline, LLM, and voice executor (app-scoped natives) only when finishing —
+        // not on a config-change recreation that will re-use them.
+        if (isFinishing) {
+            AppGraph.visionPipeline.stop()
+            AppGraph.voiceAgent.shutdown()
+            AppGraph.llmEngine.close()
+        }
         super.onDestroy()
     }
 

@@ -3,46 +3,77 @@ package com.sixthsense.voice
 import android.util.Log
 import com.sixthsense.core.SceneState
 import com.sixthsense.core.SceneBus
+import java.util.concurrent.Executors
 
 /**
- * On-device voice agent placeholder. In starter mode it does keyword intent
- * routing and generates a deterministic, rule-based answer from the current
- * [SceneState], then LOGS it (it does not pretend a full model exists).
+ * On-device voice agent. Keyword intent routing over the current [SceneState],
+ * with a deterministic rule-based answer that ALWAYS works, plus an optional
+ * **on-device LLM** ([LlmEngine], ExecuTorch-hosted Qwen) for natural,
+ * scene-grounded answers to open-ended "what's ahead?" questions. Fully offline.
  *
- * TODO(voice):
- *   - Whisper `.pte` speech-to-text (push-to-talk capture → transcript).
- *   - Llama `.pte` 1B for natural single-sentence answers from the scene summary.
- *   - Android TextToSpeech (offline) for spoken output.
- * All of the above must run on-device — no cloud, no external LLM.
+ * - [ask] is synchronous and rule-based (safe to call on the UI thread).
+ * - [askAsync] uses the LLM when ready (it blocks, so it runs on a worker thread)
+ *   and falls back to the rule-based answer otherwise.
+ *
+ * Speech-to-text (Whisper) and TTS are wired elsewhere; this owns intent+answer.
  */
-class VoiceAgent(private val bus: SceneBus) {
-
+class VoiceAgent(
+    private val bus: SceneBus,
+    private val llm: LlmEngine? = null,
+) {
     enum class Intent { SCENE, OCR, FIND, CLEAR }
 
-    /**
-     * Optional sink for the dashboard bridge: invoked with (question, intent,
-     * answer) on every [ask] so the operator dashboard can display the agent's
-     * interaction. Wired in MainActivity to SceneSocket.updateVoice.
-     */
+    /** Dashboard sink: (question, intent, answer) on every answer. */
     var onAnswer: ((String, String, String) -> Unit)? = null
 
-    /** Answer a question from the current scene. Returns the spoken-answer text. */
+    private val genExecutor = Executors.newSingleThreadExecutor()
+
+    /** Synchronous, rule-based answer from the current scene. */
     fun ask(question: String): String {
         val scene = bus.state.value
         val intent = route(question)
-        val answer = when (intent) {
-            Intent.SCENE -> describeScene(scene)
-            Intent.OCR -> if (scene.ocr.present && scene.ocr.text.isNotBlank())
-                "The sign says: ${scene.ocr.text}." else "I don't see readable text."
-            Intent.FIND -> findExit(scene)
-            Intent.CLEAR -> if (scene.pathClear && scene.conf >= 0.4f)
-                "Path appears clear, continue forward."
-            else "I'm not sure the path is clear, proceed carefully."
-        }
+        val answer = ruleAnswer(intent, scene)
         Log.i(TAG, "Q='$question' -> A='$answer'")
-        // TODO(voice): speak `answer` via offline Android TextToSpeech.
         onAnswer?.invoke(question, intent.name, answer)
         return answer
+    }
+
+    /**
+     * Answer asynchronously. For open-ended SCENE questions, uses the on-device LLM
+     * (grounded in the scene) when available; everything else (and any failure)
+     * falls back to the rule-based answer. [onResult] is called on a worker thread.
+     */
+    fun askAsync(question: String, onResult: (String) -> Unit) {
+        val scene = bus.state.value
+        val intent = route(question)
+        val engine = llm
+        if (intent != Intent.SCENE || engine == null || !engine.isReady) {
+            val a = ruleAnswer(intent, scene)
+            Log.i(TAG, "Q='$question' -> A(rule)='$a'")
+            onAnswer?.invoke(question, intent.name, a)
+            onResult(a)
+            return
+        }
+        genExecutor.execute {
+            val prompt = engine.buildPrompt(SYSTEM_PROMPT, sceneSummary(scene, question))
+            val llmAnswer = engine.generate(prompt)?.takeIf { it.isNotBlank() }
+            val answer = llmAnswer ?: ruleAnswer(intent, scene)  // graceful fallback
+            Log.i(TAG, "Q='$question' -> A(${if (llmAnswer != null) "llm" else "rule"})='$answer'")
+            onAnswer?.invoke(question, intent.name, answer)
+            onResult(answer)
+        }
+    }
+
+    fun shutdown() = genExecutor.shutdown()
+
+    private fun ruleAnswer(intent: Intent, scene: SceneState): String = when (intent) {
+        Intent.SCENE -> describeScene(scene)
+        Intent.OCR -> if (scene.ocr.present && scene.ocr.text.isNotBlank())
+            "The sign says: ${scene.ocr.text}." else "I don't see readable text."
+        Intent.FIND -> findExit(scene)
+        Intent.CLEAR -> if (scene.pathClear && scene.conf >= 0.4f)
+            "Path appears clear, continue forward."
+        else "I'm not sure the path is clear, proceed carefully."
     }
 
     private fun route(text: String): Intent {
@@ -53,6 +84,27 @@ class VoiceAgent(private val bus: SceneBus) {
             Regex("exit|door|way out|find").containsMatchIn(x) -> Intent.FIND
             Regex("clear|safe|walk").containsMatchIn(x) -> Intent.CLEAR
             else -> Intent.SCENE
+        }
+    }
+
+    /** Compact, grounded scene description for the LLM prompt (never invents objects). */
+    private fun sceneSummary(s: SceneState, question: String): String {
+        fun obj(zone: String) = s.objects.firstOrNull { it.zone == zone }?.label
+        fun band(v: Float) = when {
+            v >= 0.7f -> "near"; v >= 0.45f -> "mid"; else -> "far"
+        }
+        fun line(zone: String, depth: Float): String {
+            val label = obj(zone) ?: if (depth >= 0.55f) "obstacle" else "clear"
+            return "$label (${band(depth)})"
+        }
+        return buildString {
+            append("Scene:\n")
+            append("  ahead: ").append(line("center", s.depth.center)).append('\n')
+            append("  left:  ").append(line("left", s.depth.left)).append('\n')
+            append("  right: ").append(line("right", s.depth.right)).append('\n')
+            append("  text:  ").append(if (s.ocr.present) s.ocr.text else "none").append('\n')
+            if (s.depth.curbAhead || s.depth.stepDown) append("  note:  curb or step ahead\n")
+            append("Question: ").append(question)
         }
     }
 
@@ -82,5 +134,9 @@ class VoiceAgent(private val bus: SceneBus) {
 
     companion object {
         private const val TAG = "SixthSenseMCP"
+        private const val SYSTEM_PROMPT =
+            "You are SixthSense, a navigation assistant for a blind user walking. " +
+                "Answer in ONE short spoken sentence, concrete and directional (left, right, ahead, steps). " +
+                "If uncertain, say so and advise caution. Never invent objects that are not listed."
     }
 }

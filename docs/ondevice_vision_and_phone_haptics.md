@@ -1,5 +1,10 @@
 # On-device NPU vision + directional phone-haptics test mode
 
+> **Update:** the CV backend moved from ExecuTorch to **Qualcomm AI Hub / LiteRT** (NPU) while the
+> LLM stays on ExecuTorch — see [hybrid_aihub_litert_executorch.md](hybrid_aihub_litert_executorch.md).
+> The **phone-haptics** sections below are still current; the ExecuTorch-`.pte`/QNN-AAR CV details are
+> historical.
+
 This documents the two capabilities added on top of the SixthSense starter: a real,
 fully **on-device** vision pipeline (CameraX + ExecuTorch) and a **directional
 phone-vibration test mode** that needs no belt and no BLE.

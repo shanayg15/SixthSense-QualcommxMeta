@@ -31,7 +31,7 @@ data class VisionStatus(
     val running: Boolean = false,
     val depthLoaded: Boolean = false,
     val yoloLoaded: Boolean = false,
-    val backend: String = BuildConfig.EXECUTORCH_BACKEND,
+    val backend: String = BuildConfig.CV_BACKEND,
     val depthMs: Double = 0.0,
     val yoloMs: Double = 0.0,
     val fps: Double = 0.0,
@@ -41,28 +41,25 @@ data class VisionStatus(
 
 /**
  * The live, fully ON-DEVICE perception pipeline. CameraX frames are run through
- * ExecuTorch `.pte` models (Depth-Anything-V2 + YOLOv11n) entirely on the phone —
- * no network, airplane-mode capable — and the result is published as [SceneState]
- * on the [SceneBus] that the belt mapper, voice agent, dashboard, and phone-haptics
- * test mode all consume.
+ * Qualcomm-AI-Hub **LiteRT (.tflite)** CV models — Depth-Anything-V2 + YOLOv11 —
+ * on the Hexagon **NPU** (GPU/CPU fallback), and the result is published as
+ * [SceneState] on the [SceneBus] consumed by the belt mapper, voice agent,
+ * dashboard, and phone-haptics test mode. (The on-device LLM stays on ExecuTorch.)
  *
- * Backend is baked into the `.pte` at export time (XNNPACK CPU now, Qualcomm
- * QNN/Hexagon NPU as a drop-in later — see docs); this code is identical for both.
- *
- * Degrades gracefully: with no `.pte` in assets it stays idle and logs that mock
- * mode should be used (it never emits a confidently-wrong scene). Depth gates
- * emission — protecting MVP rung 1 (depth -> belt); YOLO is additive.
+ * AI Hub TFLite is NHWC: depth output flattens to a 518×518 inverse-depth map;
+ * YOLO output is pre-decoded boxes/scores/class_idx (NMS only). Degrades
+ * gracefully: with no `.tflite` in assets it stays idle (use Mock mode).
  */
 class VisionPipeline(
     private val context: Context,
     private val bus: SceneBus,
 ) {
     private val analysisExecutor = Executors.newSingleThreadExecutor()
-    private val depthConv = FrameToTensor(DEPTH_SIZE, Norm.IMAGENET)
-    private val yoloConv = FrameToTensor(YOLO_SIZE, Norm.SCALE_0_1)
+    private val depthConv = LiteRtFrameConverter(DEPTH_SIZE)
+    private val yoloConv = LiteRtFrameConverter(YOLO_SIZE)
 
-    @Volatile private var depthModule: EtModule? = null
-    @Volatile private var yoloModule: EtModule? = null
+    @Volatile private var depthModel: LiteRtModel? = null
+    @Volatile private var yoloModel: LiteRtModel? = null
     @Volatile private var running = false
     @Volatile private var modelsRequested = false
 
@@ -80,17 +77,10 @@ class VisionPipeline(
     private val _status = MutableStateFlow(VisionStatus())
     val status: StateFlow<VisionStatus> = _status.asStateFlow()
 
-    /**
-     * Start live vision. Loads models off the main thread, then binds CameraX
-     * [Preview] (optional, for the operator) + [ImageAnalysis] to [owner]'s lifecycle.
-     */
     @Synchronized
     fun start(owner: LifecycleOwner, previewView: PreviewView?) {
         running = true
         _status.value = _status.value.copy(running = true, note = "loading models…")
-        // Load once on the analysis thread; queued analyze() calls run after, so
-        // models are ready by the first inference (no null-module race). bindCamera
-        // unbinds first, so re-tapping Start (e.g. after rotation) safely rebinds.
         if (!modelsRequested) {
             modelsRequested = true
             analysisExecutor.execute { loadModels() }
@@ -107,11 +97,10 @@ class VisionPipeline(
             runCatching { cameraProvider?.unbindAll() }
         }
         // analyze() and this close run on the SAME single-thread executor, so the
-        // close is serialized strictly after any in-flight/queued analyze — no
-        // half-destroyed-module access is possible.
+        // close is serialized strictly after any in-flight/queued analyze.
         analysisExecutor.execute {
-            depthModule?.close(); depthModule = null
-            yoloModule?.close(); yoloModule = null
+            depthModel?.close(); depthModel = null
+            yoloModel?.close(); yoloModel = null
         }
         _status.value = VisionStatus(note = "stopped")
         Log.i(TAG, "VisionPipeline stopped.")
@@ -128,21 +117,23 @@ class VisionPipeline(
     }
 
     private fun loadModels() {
-        depthModule = EtModule.tryLoad(context, DEPTH_ASSETS)
-        yoloModule = EtModule.tryLoad(context, YOLO_ASSETS)
-        val backend = BuildConfig.EXECUTORCH_BACKEND
+        depthModel = LiteRtModel.tryLoad(context, DEPTH_ASSETS)
+        yoloModel = LiteRtModel.tryLoad(context, YOLO_ASSETS)
+        val accel = depthModel?.accelerator ?: yoloModel?.accelerator
+        val backend = if (accel != null) "litert/$accel" else BuildConfig.CV_BACKEND
         val note = when {
-            depthModule == null && yoloModule == null ->
-                "No models in assets/models — add depth.pte / yolo.pte, or use Mock mode."
-            depthModule == null ->
+            depthModel == null && yoloModel == null ->
+                "No .tflite in assets/models — add depth.tflite / yolo.tflite (AI Hub), or use Mock mode."
+            depthModel == null ->
                 "YOLO only ($backend) — detection drives haptics; nearness from box size."
-            yoloModule == null ->
+            yoloModel == null ->
                 "Depth only ($backend) — belt works; no object labels."
             else -> "Depth + YOLO loaded on $backend."
         }
         _status.value = _status.value.copy(
-            depthLoaded = depthModule != null,
-            yoloLoaded = yoloModule != null,
+            depthLoaded = depthModel != null,
+            yoloLoaded = yoloModel != null,
+            backend = backend,
             note = note,
         )
         Log.i(TAG, note)
@@ -154,7 +145,6 @@ class VisionPipeline(
             try {
                 val provider = future.get()
                 cameraProvider = provider
-
                 val preview = previewView?.let { pv ->
                     Preview.Builder().build().also { it.surfaceProvider = pv.surfaceProvider }
                 }
@@ -163,7 +153,6 @@ class VisionPipeline(
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                     .build()
                     .also { it.setAnalyzer(analysisExecutor, ::analyze) }
-
                 provider.unbindAll()
                 val useCases = listOfNotNull(preview, analysis).toTypedArray()
                 provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, *useCases)
@@ -178,43 +167,44 @@ class VisionPipeline(
     /** Runs on [analysisExecutor], never the main thread. */
     private fun analyze(image: ImageProxy) {
         try {
-            // Stream the raw camera frame to the dashboard even before models load.
             maybeStreamFrame(image)
-            val depth = depthModule
-            val yolo = yoloModule
+            val depth = depthModel
+            val yolo = yoloModel
             if (depth == null && yolo == null) return  // nothing loaded -> emit nothing (safe)
 
-            // Depth (if present) -> zones + a depth map for object nearness.
+            // Depth (if present) -> zones + a flat depth map for object nearness.
             var zones = DepthZones(0f, 0f, 0f)
             var depthData: FloatArray? = null
             var dw = 0; var dh = 0
             var depthMs = 0.0
             if (depth != null) {
                 val t0 = System.nanoTime()
-                val depthOut = depth.forward(depthConv.toTensor(image))
+                val outs = depth.run(depthConv.toNHWC(image))
                 depthMs = (System.nanoTime() - t0) / 1_000_000.0
-                val dims = depthDims(depthOut)
-                dw = dims.first; dh = dims.second
-                depthData = depthOut.data
-                zones = DepthDecoder.toZones(depthOut.data, dw, dh)
+                // Depth map is the largest output ([1,518,518,1] -> 518*518); guard
+                // against an empty/multi-tensor graph instead of blindly indexing [0].
+                val flat = outs.maxByOrNull { it.size }
+                if (flat != null && flat.isNotEmpty()) {
+                    val side = depthSide(flat.size)
+                    dw = side; dh = side; depthData = flat
+                    zones = DepthDecoder.toZones(flat, side, side)
+                }
             }
 
-            // YOLO (if present) -> objects. Nearness from depth when available, else
-            // from box size — so object detection runs and drives haptics standalone.
+            // YOLO (if present) -> objects. AI Hub output is pre-decoded (NMS only).
             var objects: List<DetectedObj> = emptyList()
             var yoloMs = 0.0
             if (yolo != null) {
                 val t1 = System.nanoTime()
-                val yoloOut = yolo.forward(yoloConv.toTensor(image))
+                val outs = yolo.run(yoloConv.toNHWC(image))
                 yoloMs = (System.nanoTime() - t1) / 1_000_000.0
-                val dets = YoloDecoder.decode(yoloOut.data, inputSize = YOLO_SIZE)
+                val dets = LiteRtYolo.decode(outs, inputSize = YOLO_SIZE)
                 objects = if (depthData != null)
                     SceneAssembler.toDetectedObjects(dets, depthData, dw, dh, YOLO_SIZE)
                 else
                     SceneAssembler.toDetectedObjectsNoDepth(dets, YOLO_SIZE)
             }
 
-            // Path is clear only if neither depth nor a centered near object blocks it.
             val centerObjNear = objects.any {
                 it.zone == "center" && it.nearness >= BeltMapper.OBJECT_NEAR_THRESHOLD
             }
@@ -291,18 +281,10 @@ class VisionPipeline(
         )
     }
 
-    /**
-     * Derive (width, height) of the depth map from the output shape's last two dims.
-     * For a [..,H,W] tensor that is (W, H) = (s[last], s[last-1]); the depth map is
-     * square (518x518) so order only matters for indexing, which uses row*w+col.
-     */
-    private fun depthDims(out: EtModule.Out): Pair<Int, Int> {
-        val s = out.shape
-        return if (s.size >= 2) s[s.size - 1].toInt() to s[s.size - 2].toInt()
-        else {
-            val side = sqrt(out.data.size.toDouble()).roundToInt()
-            side to side
-        }
+    /** Side length of a square depth map from its flattened length (518*518 -> 518). */
+    private fun depthSide(len: Int): Int {
+        val s = sqrt(len.toDouble()).roundToInt()
+        return if (s > 0) s else DEPTH_SIZE
     }
 
     companion object {
@@ -314,16 +296,14 @@ class VisionPipeline(
         private const val FRAME_QUALITY = 50
         private const val FRAME_MIN_INTERVAL_MS = 125L   // ~8 fps to the dashboard
 
-        // Candidate asset names (Stream B ships depth.pte/yolo.pte; docs use longer names).
+        // AI Hub LiteRT artifacts (git-ignored; from export_aihub_cv.sh).
         private val DEPTH_ASSETS = listOf(
-            "models/depth.pte",
-            "models/depth_anything_v2.pte",
-            "models/depth_anything_v2_small.pte",
+            "models/depth.tflite",
+            "models/depth_anything_v2.tflite",
         )
         private val YOLO_ASSETS = listOf(
-            "models/yolo.pte",
-            "models/yolo11n.pte",
-            "models/yolov11n.pte",
+            "models/yolo.tflite",
+            "models/yolov11_det.tflite",
         )
     }
 }
