@@ -1,0 +1,75 @@
+# ---- macOS ----
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# ---- Local env / secrets (NEVER commit) ----
+.env
+.env.*
+*.local
+local.properties
+secrets.properties
+*.keystore
+*.jks
+**/keystore.properties
+**/google-services.json
+# API keys / tokens
+.qai-hub.ini
+qai_hub.ini
+*.token
+*token*.txt
+gh-token*
+qualcomm-token*
+
+# ---- Python (MCP server) ----
+mcp/.venv/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.uv/
+uv.lock
+
+# ---- Node / dashboard ----
+node_modules/
+dashboard/dist/
+dashboard/.vite/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- Android / Gradle ----
+android/.gradle/
+android/build/
+android/app/build/
+android/captures/
+android/.idea/
+android/*.iml
+android/app/*.iml
+.cxx/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# ---- Models (large binaries — keep out of git) ----
+*.pte
+*.pt
+*.onnx
+*.tflite
+*.bin
+*.gguf
+android/app/src/main/assets/models/
+
+# ---- Arduino / firmware build output ----
+firmware/**/build/
+*.hex
+*.elf
+
+# ---- IDE / misc ----
+.vscode/
+*.log
+.tmp/
