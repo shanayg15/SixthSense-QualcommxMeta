@@ -81,6 +81,15 @@ class VisionPipeline(
     private var emaFps = 0.0
     private var lastFrameEmitMs = 0L
 
+    // Cadence: YOLO runs every frame; depth runs every DEPTH_EVERY_N frames and its
+    // result is cached + reused in between. All cache fields are analyzer-thread-only.
+    private var frameCount = 0L
+    private var cachedZones = DepthZones(0f, 0f, 0f)
+    private var cachedDepthData: FloatArray? = null
+    private var cachedDw = 0
+    private var cachedDh = 0
+    private var cachedDepthMs = 0.0
+
     /** Dashboard frame sink: a downscaled base64 JPEG of the live camera + its rotation. */
     var onFrame: ((String, Int) -> Unit)? = null
 
@@ -116,7 +125,10 @@ class VisionPipeline(
             runCatching { cameraProvider?.unbindAll() }
         }
         // Close each module on its own executor (serialized after any in-flight forward).
-        analysisExecutor.execute { depthModule?.close(); depthModule = null }
+        analysisExecutor.execute {
+            depthModule?.close(); depthModule = null
+            cachedDepthData = null; cachedZones = DepthZones(0f, 0f, 0f); frameCount = 0L
+        }
         yoloExecutor.execute { yoloModule?.close(); yoloModule = null }
         _status.value = VisionStatus(note = "stopped")
         Log.i(TAG, "VisionPipeline stopped.")
@@ -142,7 +154,7 @@ class VisionPipeline(
                 "YOLO only ($backend) — detection drives haptics; nearness from box size."
             yoloModule == null ->
                 "Depth only ($backend) — belt works; no object labels."
-            else -> "Depth + YOLO loaded on $backend (parallel)."
+            else -> "Depth + YOLO loaded on $backend (parallel, depth 1/$DEPTH_EVERY_N)."
         }
         _status.value = _status.value.copy(
             depthLoaded = depthModule != null,
@@ -202,19 +214,25 @@ class VisionPipeline(
                 })
             } else null
 
-            // Depth on this thread, concurrently with the YOLO task.
-            var zones = DepthZones(0f, 0f, 0f)
-            var depthData: FloatArray? = null
-            var dw = 0; var dh = 0
-            var depthMs = 0.0
-            if (depth != null) {
+            // Depth runs every DEPTH_EVERY_N frames (every frame if there's no YOLO to
+            // stay responsive for); other frames reuse the cached depth map. On a depth
+            // frame it runs HERE, concurrently with the YOLO task on yoloExecutor.
+            if (depth != null && (yolo == null || frameCount % DEPTH_EVERY_N == 0L)) {
                 val t0 = System.nanoTime()
                 val flat = depth.forward(depthConv.toTensor(upright)).data
-                depthMs = (System.nanoTime() - t0) / 1_000_000.0
+                cachedDepthMs = (System.nanoTime() - t0) / 1_000_000.0
                 val side = depthSide(flat.size)
-                dw = side; dh = side; depthData = flat
-                zones = DepthDecoder.toZones(flat, side, side)
+                cachedDw = side; cachedDh = side; cachedDepthData = flat
+                cachedZones = DepthDecoder.toZones(flat, side, side)
+            } else if (depth == null) {
+                cachedZones = DepthZones(0f, 0f, 0f); cachedDepthData = null
             }
+            frameCount++
+            // Latest-available depth (this frame's, or the cached one) + this frame's YOLO.
+            val zones = cachedZones
+            val depthData = cachedDepthData
+            val dw = cachedDw; val dh = cachedDh
+            val depthMs = cachedDepthMs
 
             // Join the parallel YOLO result.
             var objects: List<DetectedObj> = emptyList()
@@ -319,6 +337,7 @@ class VisionPipeline(
         private const val FRAME_QUALITY = 50
         private const val FRAME_MIN_INTERVAL_MS = 125L   // ~8 fps to the dashboard
         private const val INFER_TIMEOUT_MS = 4000L       // guard: never hang the analyzer
+        private const val DEPTH_EVERY_N = 3L             // run heavy depth 1 in 3 frames
 
         private val DEPTH_ASSETS = listOf(
             "models/depth.pte",
