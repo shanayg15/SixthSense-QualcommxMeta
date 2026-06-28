@@ -90,6 +90,8 @@ class MainActivity : AppCompatActivity() {
             socket?.updateVoice(q, intent, a)
             AppGraph.tts.speak(a)   // speak the agent's answer (on-device TTS)
         }
+        // Spoken "read that sign" runs live on-device OCR on the current frame.
+        AppGraph.voiceAgent.ocrRunner = { result -> runOcr(result) }
     }
 
     private fun buildUi(): ScrollView {
@@ -215,15 +217,14 @@ class MainActivity : AppCompatActivity() {
         AppGraph.visionPipeline.start(this, previewView)
     }
 
-    /** On-demand OCR: recognize text in the latest camera frame, speak it, and publish
-     *  it on the scene so the dashboard shows it too. */
-    private fun readTextOcr() {
+    /** Run on-device OCR on the latest frame, publish the text on the scene (so the
+     *  dashboard shows it), then call [onText] on the main thread. "" if no frame yet. */
+    private fun runOcr(onText: (String) -> Unit) {
         val frame = AppGraph.visionPipeline.lastFrame()
         if (frame == null) {
-            toast("Start live vision first.")
+            onText("")
             return
         }
-        toast("Reading text…")
         AppGraph.ocrEngine.recognize(frame) { text ->
             runOnUiThread {
                 val current = AppGraph.sceneBus.state.value
@@ -233,10 +234,22 @@ class MainActivity : AppCompatActivity() {
                         ocr = com.sixthsense.core.Ocr(present = text.isNotBlank(), text = text),
                     )
                 )
-                val spoken = if (text.isBlank()) "I don't see readable text." else "The sign says: $text"
-                AppGraph.tts.speak(spoken)
-                toast(spoken)
+                onText(text)
             }
+        }
+    }
+
+    /** OCR button: recognize text in the current frame, then speak it. */
+    private fun readTextOcr() {
+        if (AppGraph.visionPipeline.lastFrame() == null) {
+            toast("Start live vision first.")
+            return
+        }
+        toast("Reading text…")
+        runOcr { text ->
+            val spoken = if (text.isBlank()) "I don't see readable text." else "The sign says: $text"
+            AppGraph.tts.speak(spoken)
+            toast(spoken)
         }
     }
 
