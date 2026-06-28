@@ -185,13 +185,18 @@
   function scheduleReconnect() { clearReconnect(); if (state.wantConnected) reconnectTimer = setTimeout(openSocket, RECONNECT_MS); }
 
   function ingest(raw) {
+    // fps = the CAMERA frame rate (count only messages that carry a frame), not the
+    // total message rate — scene-only updates (boxes/depth/belt) arrive more often.
+    var hadFrame = typeof raw.frame === "string" && raw.frame.length > 0;
     state.scene = normalize(raw);
-    var now = perf();
-    state.frameTimes.push(now); if (state.frameTimes.length > 12) state.frameTimes.shift();
-    if (state.frameTimes.length > 1) {
-      var span = state.frameTimes[state.frameTimes.length - 1] - state.frameTimes[0];
-      state.ms = span / (state.frameTimes.length - 1);
-      state.fps = state.ms > 0 ? 1000 / state.ms : 0;
+    if (hadFrame) {
+      var now = perf();
+      state.frameTimes.push(now); if (state.frameTimes.length > 12) state.frameTimes.shift();
+      if (state.frameTimes.length > 1) {
+        var span = state.frameTimes[state.frameTimes.length - 1] - state.frameTimes[0];
+        state.ms = span / (state.frameTimes.length - 1);
+        state.fps = state.ms > 0 ? 1000 / state.ms : 0;
+      }
     }
     render();
   }
