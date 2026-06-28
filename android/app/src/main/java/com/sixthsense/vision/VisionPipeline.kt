@@ -19,7 +19,11 @@ import com.sixthsense.core.DetectedObj
 import com.sixthsense.core.SceneBus
 import com.sixthsense.core.SceneState
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -41,26 +45,30 @@ data class VisionStatus(
 
 /**
  * The live, fully ON-DEVICE perception pipeline. CameraX frames are run through
- * ExecuTorch `.pte` models (Depth-Anything-V2 + YOLOv11n) entirely on the phone —
- * no network, airplane-mode capable — and the result is published as [SceneState]
- * on the [SceneBus] that the belt mapper, voice agent, dashboard, and phone-haptics
- * test mode all consume.
+ * ExecuTorch `.pte` models (Depth-Anything-V2 + YOLOv11n) entirely on the phone.
  *
- * Backend is baked into the `.pte` at export time (XNNPACK CPU now, Qualcomm
- * QNN/Hexagon NPU as a drop-in later — see docs); this code is identical for both.
+ * PARALLEL INFERENCE: depth runs on the analyzer thread while YOLO runs on its own
+ * executor, both fed from one shared upright bitmap, so per-frame latency is
+ * ~max(depth, yolo) instead of depth + yolo. Each model lives entirely on one
+ * thread (load + forward + close) so a single Module is never touched concurrently.
  *
- * Degrades gracefully: with no `.pte` in assets it stays idle and logs that mock
- * mode should be used (it never emits a confidently-wrong scene). Depth gates
- * emission — protecting MVP rung 1 (depth -> belt); YOLO is additive.
+ * Degrades gracefully: with no `.pte` in assets it stays idle (use Mock mode).
  */
 class VisionPipeline(
     private val context: Context,
     private val bus: SceneBus,
 ) {
-    private val analysisExecutor = Executors.newSingleThreadExecutor()
+    // analysisExecutor: camera analyzer + depth (load/forward/close) + orchestration.
+    private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    // yoloExecutor: YOLO (load/forward/close) — runs in parallel with depth.
+    private val yoloExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val depthConv = FrameToTensor(DEPTH_SIZE, Norm.IMAGENET)
     private val yoloConv = FrameToTensor(YOLO_SIZE, Norm.SCALE_0_1)
 
+    // INVARIANT: depthModule is only forwarded/closed on analysisExecutor, yoloModule
+    // only on yoloExecutor. ExecuTorch Modules are not reentrant, so a single Module is
+    // never touched from two threads at once (the two models DO run in parallel, but on
+    // separate Module instances + separate executors).
     @Volatile private var depthModule: EtModule? = null
     @Volatile private var yoloModule: EtModule? = null
     @Volatile private var running = false
@@ -68,9 +76,19 @@ class VisionPipeline(
     @Volatile private var loggedYolo = false
 
     private var cameraProvider: ProcessCameraProvider? = null
+    // Written only on analysisExecutor (updateStatus / maybeStreamFrame) — single thread, no race.
     private var lastFrameNs = 0L
     private var emaFps = 0.0
     private var lastFrameEmitMs = 0L
+
+    // Cadence: YOLO runs every frame; depth runs every DEPTH_EVERY_N frames and its
+    // result is cached + reused in between. All cache fields are analyzer-thread-only.
+    private var frameCount = 0L
+    private var cachedZones = DepthZones(0f, 0f, 0f)
+    private var cachedDepthData: FloatArray? = null
+    private var cachedDw = 0
+    private var cachedDh = 0
+    private var cachedDepthMs = 0.0
 
     /** Dashboard frame sink: a downscaled base64 JPEG of the live camera + its rotation. */
     var onFrame: ((String, Int) -> Unit)? = null
@@ -81,20 +99,19 @@ class VisionPipeline(
     private val _status = MutableStateFlow(VisionStatus())
     val status: StateFlow<VisionStatus> = _status.asStateFlow()
 
-    /**
-     * Start live vision. Loads models off the main thread, then binds CameraX
-     * [Preview] (optional, for the operator) + [ImageAnalysis] to [owner]'s lifecycle.
-     */
+    private class Timed(val out: EtModule.Out, val ms: Double)
+
     @Synchronized
     fun start(owner: LifecycleOwner, previewView: PreviewView?) {
         running = true
         _status.value = _status.value.copy(running = true, note = "loading models…")
-        // Load once on the analysis thread; queued analyze() calls run after, so
-        // models are ready by the first inference (no null-module race). bindCamera
-        // unbinds first, so re-tapping Start (e.g. after rotation) safely rebinds.
+        // Load each model on the SAME executor it will run on (depth=analysis, yolo=yolo)
+        // so a Module is loaded/forwarded/closed from one thread. Queued before camera
+        // frames arrive, so a model is ready by its first inference.
         if (!modelsRequested) {
             modelsRequested = true
-            analysisExecutor.execute { loadModels() }
+            analysisExecutor.execute { depthModule = EtModule.tryLoad(context, DEPTH_ASSETS); onModelsChanged() }
+            yoloExecutor.execute { yoloModule = EtModule.tryLoad(context, YOLO_ASSETS); onModelsChanged() }
         }
         bindCamera(owner, previewView)
     }
@@ -107,30 +124,28 @@ class VisionPipeline(
         ContextCompat.getMainExecutor(context).execute {
             runCatching { cameraProvider?.unbindAll() }
         }
-        // analyze() and this close run on the SAME single-thread executor, so the
-        // close is serialized strictly after any in-flight/queued analyze — no
-        // half-destroyed-module access is possible.
+        // Close each module on its own executor (serialized after any in-flight forward).
         analysisExecutor.execute {
             depthModule?.close(); depthModule = null
-            yoloModule?.close(); yoloModule = null
+            cachedDepthData = null; cachedZones = DepthZones(0f, 0f, 0f); frameCount = 0L
         }
+        yoloExecutor.execute { yoloModule?.close(); yoloModule = null }
         _status.value = VisionStatus(note = "stopped")
         Log.i(TAG, "VisionPipeline stopped.")
     }
 
     fun shutdown() {
         stop()
-        analysisExecutor.shutdown()
-        runCatching {
-            if (!analysisExecutor.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS)) {
-                analysisExecutor.shutdownNow()
-            }
+        for (ex in listOf(analysisExecutor, yoloExecutor)) {
+            ex.shutdown()
+            runCatching { if (!ex.awaitTermination(2, TimeUnit.SECONDS)) ex.shutdownNow() }
         }
     }
 
-    private fun loadModels() {
-        depthModule = EtModule.tryLoad(context, DEPTH_ASSETS)
-        yoloModule = EtModule.tryLoad(context, YOLO_ASSETS)
+    // @Synchronized: called from BOTH load executors (depth + yolo), so make the
+    // read-modify-write of _status atomic across them.
+    @Synchronized
+    private fun onModelsChanged() {
         val backend = BuildConfig.EXECUTORCH_BACKEND
         val note = when {
             depthModule == null && yoloModule == null ->
@@ -139,7 +154,7 @@ class VisionPipeline(
                 "YOLO only ($backend) — detection drives haptics; nearness from box size."
             yoloModule == null ->
                 "Depth only ($backend) — belt works; no object labels."
-            else -> "Depth + YOLO loaded on $backend."
+            else -> "Depth + YOLO loaded on $backend (parallel, depth 1/$DEPTH_EVERY_N)."
         }
         _status.value = _status.value.copy(
             depthLoaded = depthModule != null,
@@ -155,8 +170,9 @@ class VisionPipeline(
             try {
                 val provider = future.get()
                 cameraProvider = provider
-
                 val preview = previewView?.let { pv ->
+                    // Preview has setSurfaceProvider() but no getter, so it's not a Kotlin
+                    // property — call the method (not `it.surfaceProvider = …`).
                     Preview.Builder().build().also { it.setSurfaceProvider(pv.surfaceProvider) }
                 }
                 val analysis = ImageAnalysis.Builder()
@@ -164,7 +180,6 @@ class VisionPipeline(
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                     .build()
                     .also { it.setAnalyzer(analysisExecutor, ::analyze) }
-
                 provider.unbindAll()
                 val useCases = listOfNotNull(preview, analysis).toTypedArray()
                 provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, *useCases)
@@ -176,57 +191,75 @@ class VisionPipeline(
         }, ContextCompat.getMainExecutor(context))
     }
 
-    /** Runs on [analysisExecutor], never the main thread. */
+    /** Runs on [analysisExecutor]. Depth runs here; YOLO runs in parallel on [yoloExecutor]. */
     private fun analyze(image: ImageProxy) {
         try {
-            // Stream the raw camera frame to the dashboard even before models load.
-            maybeStreamFrame(image)
             val depth = depthModule
             val yolo = yoloModule
             if (depth == null && yolo == null) return  // nothing loaded -> emit nothing (safe)
 
-            // Depth (if present) -> zones + a depth map for object nearness.
-            var zones = DepthZones(0f, 0f, 0f)
-            var depthData: FloatArray? = null
-            var dw = 0; var dh = 0
-            var depthMs = 0.0
-            if (depth != null) {
-                val t0 = System.nanoTime()
-                val depthOut = depth.forward(depthConv.toTensor(image))
-                depthMs = (System.nanoTime() - t0) / 1_000_000.0
-                val dims = depthDims(depthOut)
-                dw = dims.first; dh = dims.second
-                depthData = depthOut.data
-                zones = DepthDecoder.toZones(depthOut.data, dw, dh)
-            }
+            // Convert the camera frame ONCE into a shared, read-only upright bitmap.
+            // SAFETY: 'upright' is never recycled here (left to GC) and is only READ —
+            // depth (this thread) and YOLO (yoloExecutor) each createScaledBitmap from
+            // it into their OWN copy, which they recycle independently. Concurrent reads
+            // of a Bitmap are safe. maybeStreamFrame runs synchronously BEFORE the YOLO
+            // task is submitted, so its scaled copy never overlaps the parallel work.
+            val upright = FrameBitmap.upright(image)
+            maybeStreamFrame(upright)
 
-            // YOLO (if present) -> objects. Nearness from depth when available, else
-            // from box size — so object detection runs and drives haptics standalone.
+            // Kick YOLO off on its own thread FIRST so it overlaps depth on this thread.
+            val yoloFuture: Future<Timed>? = if (yolo != null) {
+                yoloExecutor.submit(Callable {
+                    val t = System.nanoTime()
+                    val o = yolo.forward(yoloConv.toTensor(upright))
+                    Timed(o, (System.nanoTime() - t) / 1_000_000.0)
+                })
+            } else null
+
+            // Depth runs every DEPTH_EVERY_N frames (every frame if there's no YOLO to
+            // stay responsive for); other frames reuse the cached depth map. On a depth
+            // frame it runs HERE, concurrently with the YOLO task on yoloExecutor.
+            if (depth != null && (yolo == null || frameCount % DEPTH_EVERY_N == 0L)) {
+                val t0 = System.nanoTime()
+                val flat = depth.forward(depthConv.toTensor(upright)).data
+                cachedDepthMs = (System.nanoTime() - t0) / 1_000_000.0
+                val side = depthSide(flat.size)
+                cachedDw = side; cachedDh = side; cachedDepthData = flat
+                cachedZones = DepthDecoder.toZones(flat, side, side)
+            } else if (depth == null) {
+                cachedZones = DepthZones(0f, 0f, 0f); cachedDepthData = null
+            }
+            frameCount++
+            // Latest-available depth (this frame's, or the cached one) + this frame's YOLO.
+            val zones = cachedZones
+            val depthData = cachedDepthData
+            val dw = cachedDw; val dh = cachedDh
+            val depthMs = cachedDepthMs
+
+            // Join the parallel YOLO result.
             var objects: List<DetectedObj> = emptyList()
             var yoloMs = 0.0
-            if (yolo != null) {
-                val t1 = System.nanoTime()
-                val yoloOut = yolo.forward(yoloConv.toTensor(image))
-                yoloMs = (System.nanoTime() - t1) / 1_000_000.0
-                // One-time diagnostic to debug detection: confirms the output shape and
-                // that scores look sane (if max≈0, the input scaling/model is wrong).
+            val yt = try {
+                yoloFuture?.get(INFER_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            } catch (e: Throwable) {
+                Log.w(TAG, "yolo task: ${e.message}"); null
+            }
+            if (yt != null) {
+                yoloMs = yt.ms
                 if (!loggedYolo) {
                     loggedYolo = true
                     val expected = YoloDecoder.ATTRS * YoloDecoder.ANCHORS_640
-                    val maxScore = yoloOut.data.let { d ->
-                        var m = 0f; val start = 4 * YoloDecoder.ANCHORS_640
-                        var i = start; while (i < d.size) { if (d[i] > m) m = d[i]; i++ }; m
-                    }
-                    Log.i(TAG, "YOLO out size=${yoloOut.data.size} (expect $expected) maxScore=$maxScore")
+                    var m = 0f; val d = yt.out.data; var i = 4 * YoloDecoder.ANCHORS_640
+                    while (i < d.size) { if (d[i] > m) m = d[i]; i++ }
+                    Log.i(TAG, "YOLO out size=${d.size} (expect $expected) maxScore=$m")
                 }
-                val dets = YoloDecoder.decode(yoloOut.data, inputSize = YOLO_SIZE)
+                val dets = YoloDecoder.decode(yt.out.data, inputSize = YOLO_SIZE)
                 objects = if (depthData != null)
                     SceneAssembler.toDetectedObjects(dets, depthData, dw, dh, YOLO_SIZE)
                 else
                     SceneAssembler.toDetectedObjectsNoDepth(dets, YOLO_SIZE)
             }
 
-            // Path is clear only if neither depth nor a centered near object blocks it.
             val centerObjNear = objects.any {
                 it.zone == "center" && it.nearness >= BeltMapper.OBJECT_NEAR_THRESHOLD
             }
@@ -249,38 +282,26 @@ class VisionPipeline(
         }
     }
 
-    /** Throttled: encode the current RGBA frame to a small JPEG for the dashboard. */
-    private fun maybeStreamFrame(image: ImageProxy) {
+    /** Throttled: encode the shared upright frame to a small JPEG for the dashboard. */
+    private fun maybeStreamFrame(upright: Bitmap) {
         val sink = onFrame ?: return
         if (!shouldStreamFrame()) return
         val now = System.currentTimeMillis()
         if (now - lastFrameEmitMs < FRAME_MIN_INTERVAL_MS) return
         lastFrameEmitMs = now
-        val b64 = encodeJpegBase64(image) ?: return
-        sink(b64, image.imageInfo.rotationDegrees)
+        val b64 = encodeJpegBase64(upright) ?: return
+        sink(b64, 0)  // already upright -> no extra rotation needed on the dashboard
     }
 
-    /** RGBA_8888 ImageProxy -> downscaled JPEG -> base64 (reuses the pipeline's camera). */
-    private fun encodeJpegBase64(image: ImageProxy): String? {
+    private fun encodeJpegBase64(src: Bitmap): String? {
         return try {
-            val plane = image.planes[0]
-            val pixelStride = plane.pixelStride
-            val rowPadding = plane.rowStride - pixelStride * image.width
-            val bmpW = image.width + rowPadding / pixelStride
-            val full = Bitmap.createBitmap(bmpW, image.height, Bitmap.Config.ARGB_8888)
-            plane.buffer.rewind()
-            full.copyPixelsFromBuffer(plane.buffer)
-            val cropped = if (bmpW != image.width) {
-                Bitmap.createBitmap(full, 0, 0, image.width, image.height).also { full.recycle() }
-            } else full
-            val scale = FRAME_WIDTH.toFloat() / image.width
+            val scale = FRAME_WIDTH.toFloat() / src.width
             val scaled = Bitmap.createScaledBitmap(
-                cropped, FRAME_WIDTH, (image.height * scale).roundToInt().coerceAtLeast(1), true
+                src, FRAME_WIDTH, (src.height * scale).roundToInt().coerceAtLeast(1), true
             )
             val baos = ByteArrayOutputStream()
             scaled.compress(Bitmap.CompressFormat.JPEG, FRAME_QUALITY, baos)
-            if (scaled !== cropped) cropped.recycle()
-            scaled.recycle()
+            if (scaled !== src) scaled.recycle()
             Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
         } catch (e: Throwable) {
             Log.w(TAG, "frame encode error: ${e.message}")
@@ -303,18 +324,10 @@ class VisionPipeline(
         )
     }
 
-    /**
-     * Derive (width, height) of the depth map from the output shape's last two dims.
-     * For a [..,H,W] tensor that is (W, H) = (s[last], s[last-1]); the depth map is
-     * square (518x518) so order only matters for indexing, which uses row*w+col.
-     */
-    private fun depthDims(out: EtModule.Out): Pair<Int, Int> {
-        val s = out.shape
-        return if (s.size >= 2) s[s.size - 1].toInt() to s[s.size - 2].toInt()
-        else {
-            val side = sqrt(out.data.size.toDouble()).roundToInt()
-            side to side
-        }
+    /** Side length of a square depth map from its flattened length (518*518 -> 518). */
+    private fun depthSide(len: Int): Int {
+        val s = sqrt(len.toDouble()).roundToInt()
+        return if (s > 0) s else DEPTH_SIZE
     }
 
     companion object {
@@ -325,8 +338,9 @@ class VisionPipeline(
         private const val FRAME_WIDTH = 480
         private const val FRAME_QUALITY = 50
         private const val FRAME_MIN_INTERVAL_MS = 125L   // ~8 fps to the dashboard
+        private const val INFER_TIMEOUT_MS = 4000L       // guard: never hang the analyzer
+        private const val DEPTH_EVERY_N = 3L             // run heavy depth 1 in 3 frames
 
-        // Candidate asset names (Stream B ships depth.pte/yolo.pte; docs use longer names).
         private val DEPTH_ASSETS = listOf(
             "models/depth.pte",
             "models/depth_anything_v2.pte",
