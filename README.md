@@ -2,6 +2,10 @@
 
 **An on-device navigation copilot for blind and low-vision users.**
 
+> **Running the demo?** See **[DEMO.md](DEMO.md)** — one command builds the app,
+> installs it on the S25, and launches the live camera dashboard:
+> `scripts/demo.sh` (or `scripts/demo.sh --fake` with no phone).
+
 A chest-mounted Samsung Galaxy S25 Ultra watches the path ahead, runs vision + reasoning
 models locally (ExecuTorch / Qualcomm QNN where possible), and converts the scene into a
 compact `SceneState`. That state drives three outputs:
