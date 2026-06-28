@@ -23,7 +23,8 @@ The phone sets `CENTER_L == CENTER_R`, so "ahead" lights both center motors.
 2. Add the **ESP32 board package** (Settings → *Additional boards manager URLs*):
    `https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json`
    then **Tools → Board → Boards Manager** → install *"esp32 by Espressif Systems"* (core **3.x**).
-3. **Tools → Manage Libraries** → install **NimBLE-Arduino** (by h2zero).
+3. **Tools → Manage Libraries** → install **NimBLE-Arduino** (by h2zero). The sketch targets
+   the **2.x API** (`onWrite(..., NimBLEConnInfo&)`, `enableScanResponse`, `setPower(dBm)`).
 4. **Tools → Board → ESP32 Arduino → ESP32 Dev Module**, pick the **Port**, Upload Speed 921600
    (or 115200 if it fails).
 
@@ -71,6 +72,12 @@ sets intensity.
 4. Tap **write** (up-arrow), choose **Byte Array**, and send one of (5 bytes = 10 hex chars):
    `C800000000` = LEFT · `00C8C80000` = AHEAD (both center) · `000000C800` = RIGHT.
 5. Confirm the right motor(s) buzz; vary the bytes to confirm PWM intensity + patterns.
+
+> **Text-only nRF Connect builds:** some versions have no Byte Array / hex format selector
+> and send the value as UTF-8 text (so `C800000000` arrives as the literal characters). The
+> firmware tolerates this: `onWrite` accepts **either** the 5 raw bytes **or** a 10-char
+> ASCII-hex string, so you can type `C800000000` into a text field and it still works. The
+> canonical Android `BeltClient` path always sends raw bytes.
 
 Firmware test ladder: blink → BLE advertise → appears in nRF Connect → write packet →
 correct motor buzzes → intensity scales → patterns work → Android app connects & writes.

@@ -87,16 +87,50 @@ bool patternGate() {
   }
 }
 
+// ── Debug input convenience ─────────────────────────────────────────────────
+// Canonical packet is PACKET_LEN raw bytes. Some BLE apps (e.g. text-only
+// nRF Connect builds) can only send a UTF-8 string, so also accept the packet
+// as ASCII hex, e.g. "C800000000". 2 chars per byte; the length disambiguates
+// from the raw form, so this never weakens the real protocol.
+static const int PACKET_LEN = NUM_MOTORS + 1;
+
+static int hexNibble(uint8_t c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+// If v is exactly 2*PACKET_LEN ASCII hex chars, decode it into out[PACKET_LEN].
+static bool decodeAsciiHexPacket(const NimBLEAttValue& v, uint8_t* out) {
+  if ((int)v.length() != PACKET_LEN * 2) return false;
+  for (int i = 0; i < PACKET_LEN; i++) {
+    int hi = hexNibble(v[i * 2]);
+    int lo = hexNibble(v[i * 2 + 1]);
+    if (hi < 0 || lo < 0) return false;
+    out[i] = (uint8_t)((hi << 4) | lo);
+  }
+  return true;
+}
+
 class BeltCallbacks : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic* characteristic) {
+  void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo& connInfo) override {
     NimBLEAttValue v = characteristic->getValue();
-    if (v.length() < NUM_MOTORS + 1) {
+
+    uint8_t packet[PACKET_LEN];
+    if (decodeAsciiHexPacket(v, packet)) {
+      // Debug convenience: ASCII-hex string from a text-only BLE app.
+    } else if ((int)v.length() >= PACKET_LEN) {
+      // Canonical protocol: PACKET_LEN raw bytes [m0..m3, pattern].
+      for (int i = 0; i < PACKET_LEN; i++) packet[i] = v[i];
+    } else {
       Serial.printf("[belt] short packet (%d bytes, need %d) ignored\n",
-                    v.length(), NUM_MOTORS + 1);
+                    v.length(), PACKET_LEN);
       return;
     }
-    for (int i = 0; i < NUM_MOTORS; i++) gIntensity[i] = v[i];
-    uint8_t pattern = v[NUM_MOTORS];
+
+    for (int i = 0; i < NUM_MOTORS; i++) gIntensity[i] = packet[i];
+    uint8_t pattern = packet[NUM_MOTORS];
     if (pattern > 2) pattern = 0;
     if (pattern != gPattern) gPatternStart = millis();
     gPattern = pattern;
@@ -106,10 +140,10 @@ class BeltCallbacks : public NimBLECharacteristicCallbacks {
 };
 
 class ServerCallbacks : public NimBLEServerCallbacks {
-  void onConnect(NimBLEServer* server) {
+  void onConnect(NimBLEServer* server, NimBLEConnInfo& connInfo) override {
     Serial.println("[belt] central connected");
   }
-  void onDisconnect(NimBLEServer* server) {
+  void onDisconnect(NimBLEServer* server, NimBLEConnInfo& connInfo, int reason) override {
     Serial.println("[belt] central disconnected; stopping motors and re-advertising");
     for (int i = 0; i < NUM_MOTORS; i++) gIntensity[i] = 0;
     gPattern = 0;
@@ -129,7 +163,7 @@ void setup() {
   }
 
   NimBLEDevice::init("SixthSense-Belt");
-  NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+  NimBLEDevice::setPower(9);  // dBm (NimBLE 2.x takes dBm, not the ESP_PWR_LVL_* enum)
 
   NimBLEServer* server = NimBLEDevice::createServer();
   server->setCallbacks(new ServerCallbacks());
@@ -143,7 +177,7 @@ void setup() {
 
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   adv->addServiceUUID(SERVICE_UUID);
-  adv->setScanResponse(true);
+  adv->enableScanResponse(true);
   NimBLEDevice::startAdvertising();
 
   Serial.println("[belt] advertising as 'SixthSense-Belt' (4 motors)");
