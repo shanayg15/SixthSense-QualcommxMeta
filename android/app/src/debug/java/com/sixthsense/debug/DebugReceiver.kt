@@ -29,8 +29,10 @@ class DebugReceiver : BroadcastReceiver() {
                 val c = clamp(intent.getIntExtra("c", 0), 0, 255)
                 val r = clamp(intent.getIntExtra("r", 0), 0, 255)
                 val p = clamp(intent.getIntExtra("p", 0), 0, 2)
-                val packet = byteArrayOf(l.toByte(), c.toByte(), r.toByte(), p.toByte())
-                Log.i(TAG, "DEBUG_BELT l=$l c=$c r=$r p=$p")
+                // 4-motor belt packet: [LEFT, CENTER_L, CENTER_R, RIGHT, pattern] —
+                // both center motors share the center intensity (obstacle straight ahead).
+                val packet = byteArrayOf(l.toByte(), c.toByte(), c.toByte(), r.toByte(), p.toByte())
+                Log.i(TAG, "DEBUG_BELT L=$l C=$c R=$r p=$p (4-motor)")
                 AppGraph.beltClient.send(packet)
                 // Also fire the phone's own motor so directional buzz is testable
                 // over adb with no camera and no BLE belt connected.

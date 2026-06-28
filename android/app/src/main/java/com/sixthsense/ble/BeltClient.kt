@@ -36,6 +36,11 @@ class BeltClient(private val context: Context) {
     var isConnected: Boolean = false
         private set
 
+    /** Fired (on a binder thread) when the belt connects / disconnects, so the
+     *  app can auto-start/stop driving the belt from the live scene. */
+    var onConnected: (() -> Unit)? = null
+    var onDisconnected: (() -> Unit)? = null
+
     /** Start scanning for the belt and connect to the first match. */
     fun connect() {
         val scanner = adapter?.bluetoothLeScanner
@@ -104,6 +109,7 @@ class BeltClient(private val context: Context) {
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 Log.i(TAG, "GATT disconnected (status=$status).")
                 isConnected = false
+                onDisconnected?.invoke()
             }
         }
 
@@ -117,6 +123,7 @@ class BeltClient(private val context: Context) {
             writeChar = ch
             isConnected = true
             Log.i(TAG, "Belt ready: characteristic $CHAR_UUID")
+            onConnected?.invoke()
         }
     }
 

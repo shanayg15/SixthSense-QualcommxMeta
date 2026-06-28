@@ -1,35 +1,35 @@
 /*
- * SixthSense haptic belt firmware (ESP32 + NimBLE).
+ * SixthSense haptic belt firmware (ESP32 + NimBLE) — 4-MOTOR WAIST BELT.
  *
  * The belt is a DUMB ACTUATOR. It advertises a BLE service, accepts a fixed
- * 4-byte packet [m0, m1, m2, pattern], and drives three vibration motors. It
- * performs NO navigation, NO AI, and stores no state beyond the latest command.
+ * 5-byte packet [m0, m1, m2, m3, pattern], and drives FOUR vibration motors
+ * arranged around the waist. It performs NO navigation, NO AI, and stores no
+ * state beyond the latest command.
  *
- * Packet: [m0, m1, m2, pattern]
- *   m0 = left   intensity 0..255
- *   m1 = center intensity 0..255
- *   m2 = right  intensity 0..255
+ * Motor layout (the side where the obstacle is, is what buzzes):
+ *   m0 = LEFT       — one motor on the left of the waist   (obstacle on the left)
+ *   m1 = CENTER_L ┐  two motors close together at the FRONT/center; BOTH buzz
+ *   m2 = CENTER_R ┘  for an obstacle straight ahead
+ *   m3 = RIGHT      — one motor on the right of the waist  (obstacle on the right)
  *   pattern: 0 = steady, 1 = single/caution pulse, 2 = double pulse (curb/step)
+ * Each value is an intensity 0..255 (PWM duty). The phone (BeltMapper.beltPacket4)
+ * sets CENTER_L == CENTER_R, so "ahead" lights both center motors.
  *
  * UUIDs (Nordic UART Service), matched by the Android BeltClient:
  *   service        6e400001-b5a3-f393-e0a9-e50e24dcca9e
  *   characteristic 6e400002-b5a3-f393-e0a9-e50e24dcca9e  (Write / Write-No-Response)
  *
- * ── WIRING (NEVER drive vibration motors directly from a GPIO pin) ──
- * Use a ULN2803A Darlington array (or one N-MOSFET per motor) between the ESP32
- * and the motors. GPIO pins source only a few mA; motors need more and produce
- * inductive kickback that can destroy the pin.
+ * ── WIRING (these are DRIVER-INCLUDED modules: "PWM Vibration Motor Switch
+ *    Module, DC 5V" — each has an onboard transistor, so drive the SIG/IN pin
+ *    DIRECTLY from a GPIO; no ULN2803/MOSFET needed) ──
+ *   module VCC ─► 5V rail  (ESP32 5V/VIN from USB, or a power bank for the wearable
+ *                           run; 4 motors can pull a few hundred mA — give it headroom)
+ *   module GND ─► ESP32 GND (COMMON GROUND is required)
+ *   module SIG/IN ─► ESP32 GPIO (PWM)   — one GPIO per motor, see MOTOR_PINS below
+ *   (ESP32 GPIO logic is 3.3V; these modules switch fine from 3.3V. If a module
+ *    needs 5V logic, add a level shifter on SIG.)
  *
- *   ESP32 GPIO (PWM) ─► ULN2803A input (1B..3B)
- *   ULN2803A output (1C..3C) ─► motor (−)
- *   motor (+) ─► motor V+ (e.g. battery / power-bank rail)
- *   ULN2803A COM pin ─► motor V+   (clamp-diode return path for inductive loads)
- *   ESP32 GND ─► ULN2803A GND ─► motor power GND   (common ground is required)
- *
- * Many "vibration motor modules" already include a driver transistor; if so you
- * may drive the module's IN pin directly — verify before wiring.
- *
- * Requires: ESP32 Arduino core + "NimBLE-Arduino" library (see README.md).
+ * Requires: ESP32 Arduino core 3.x + "NimBLE-Arduino" library (see README.md).
  */
 
 #include <Arduino.h>
@@ -39,13 +39,14 @@ static const char* SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 static const char* CHAR_UUID    = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 
 // ── Motor config ───────────────────────────────────────────────────────────
-#define NUM_MOTORS 3
-// PWM-capable GPIOs wired to the ULN2803A inputs (left, center, right).
-// Adjust to your board; avoid strapping pins (0, 2, 12, 15) where possible.
-const int MOTOR_PINS[NUM_MOTORS] = {25, 26, 27};
+#define NUM_MOTORS 4
+// PWM-capable GPIOs wired to each module's SIG pin, in packet order:
+//   index 0 = LEFT, 1 = CENTER_L, 2 = CENTER_R, 3 = RIGHT.
+// Avoid strapping pins (0, 2, 12, 15) and input-only pins (34-39).
+const int MOTOR_PINS[NUM_MOTORS] = {25, 26, 27, 33};
 
 // Latest command from BLE.
-volatile uint8_t  gIntensity[NUM_MOTORS] = {0, 0, 0};
+volatile uint8_t  gIntensity[NUM_MOTORS] = {0, 0, 0, 0};
 volatile uint8_t  gPattern = 0;
 volatile uint32_t gPatternStart = 0;
 
@@ -61,7 +62,7 @@ NimBLECharacteristic* gChar = nullptr;
 void applyOutputs(bool gateOn) {
   for (int i = 0; i < NUM_MOTORS; i++) {
     uint8_t value = gateOn ? gIntensity[i] : 0;
-    analogWrite(MOTOR_PINS[i], value);  // 8-bit (0..255) on ESP32 Arduino core
+    analogWrite(MOTOR_PINS[i], value);  // 8-bit (0..255) on ESP32 Arduino core 3.x
   }
 }
 
@@ -89,17 +90,18 @@ bool patternGate() {
 class BeltCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic* characteristic) {
     NimBLEAttValue v = characteristic->getValue();
-    if (v.length() < 4) {
-      Serial.printf("[belt] short packet (%d bytes) ignored\n", v.length());
+    if (v.length() < NUM_MOTORS + 1) {
+      Serial.printf("[belt] short packet (%d bytes, need %d) ignored\n",
+                    v.length(), NUM_MOTORS + 1);
       return;
     }
     for (int i = 0; i < NUM_MOTORS; i++) gIntensity[i] = v[i];
-    uint8_t pattern = v[3];
+    uint8_t pattern = v[NUM_MOTORS];
     if (pattern > 2) pattern = 0;
     if (pattern != gPattern) gPatternStart = millis();
     gPattern = pattern;
-    Serial.printf("[belt] L=%u C=%u R=%u pattern=%u\n",
-                  gIntensity[0], gIntensity[1], gIntensity[2], gPattern);
+    Serial.printf("[belt] L=%u CL=%u CR=%u R=%u pattern=%u\n",
+                  gIntensity[0], gIntensity[1], gIntensity[2], gIntensity[3], gPattern);
   }
 };
 
@@ -119,7 +121,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 void setup() {
   Serial.begin(115200);
   delay(200);
-  Serial.println("[belt] SixthSense belt starting");
+  Serial.println("[belt] SixthSense 4-motor belt starting");
 
   for (int i = 0; i < NUM_MOTORS; i++) {
     pinMode(MOTOR_PINS[i], OUTPUT);
@@ -144,7 +146,7 @@ void setup() {
   adv->setScanResponse(true);
   NimBLEDevice::startAdvertising();
 
-  Serial.println("[belt] advertising as 'SixthSense-Belt'");
+  Serial.println("[belt] advertising as 'SixthSense-Belt' (4 motors)");
 }
 
 void loop() {

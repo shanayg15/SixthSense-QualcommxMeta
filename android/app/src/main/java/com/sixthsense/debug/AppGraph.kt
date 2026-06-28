@@ -2,6 +2,7 @@ package com.sixthsense.debug
 
 import android.content.Context
 import com.sixthsense.ble.BeltClient
+import com.sixthsense.ble.BeltController
 import com.sixthsense.core.MockSceneProducer
 import com.sixthsense.core.SceneBus
 import com.sixthsense.haptics.PhoneHapticsActuator
@@ -36,6 +37,8 @@ object AppGraph {
         private set
     lateinit var phoneHaptics: PhoneHapticsController
         private set
+    lateinit var beltHaptics: BeltController
+        private set
 
     /** Background scope for producers/streams; survives Activity recreation. */
     val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -54,6 +57,11 @@ object AppGraph {
         voiceAgent = VoiceAgent(sceneBus, llmEngine)
         visionPipeline = VisionPipeline(app, sceneBus)
         phoneHaptics = PhoneHapticsController(sceneBus, PhoneHapticsActuator(app), scope)
+        beltHaptics = BeltController(sceneBus, beltClient, scope)
+        // The 4-motor belt is the primary haptic when connected: auto-drive it from
+        // the live scene on connect, stop on disconnect (firmware also zeroes motors).
+        beltClient.onConnected = { beltHaptics.setEnabled(true) }
+        beltClient.onDisconnected = { beltHaptics.setEnabled(false) }
         initialized = true
         // Load the on-device Qwen LLM off the main thread (fast no-op if qwen.pte
         // isn't bundled; the voice agent uses rule-based answers until it's ready).

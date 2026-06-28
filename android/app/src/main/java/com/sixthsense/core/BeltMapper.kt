@@ -37,14 +37,30 @@ object BeltMapper {
     const val PATTERN_PULSE = 1
     const val PATTERN_DOUBLE = 2
 
-    /** Convenience for the BLE write path. */
+    /** Convenience for the legacy 3-motor BLE write path. */
     fun map(scene: SceneState): ByteArray {
         val p = packetAsInts(scene)
         return byteArrayOf(p[0].toByte(), p[1].toByte(), p[2].toByte(), p[3].toByte())
     }
 
-    /** The same packet as ints, for SceneState.belt and the dashboard. */
-    fun packetAsInts(scene: SceneState): List<Int> {
+    /** Logical [left, center, right, pattern], for SceneState.belt, the dashboard, and
+     *  phone haptics. Includes the gentle all-clear hum. */
+    fun packetAsInts(scene: SceneState): List<Int> = compute(scene, clearHum = true)
+
+    /**
+     * 4-motor belt packet for the ESP32: `[LEFT, CENTER_L, CENTER_R, RIGHT, pattern]`.
+     * The two center motors (mounted close together at the front of the waist) share
+     * the center intensity, so an obstacle straight ahead buzzes BOTH of them; a left
+     * obstacle buzzes only LEFT, a right one only RIGHT. **Silent when the path is
+     * clear** (no all-clear hum) so the wearer only feels the obstacle's direction.
+     */
+    fun beltPacket4(scene: SceneState): ByteArray {
+        val p = compute(scene, clearHum = false)
+        return byteArrayOf(p[0].toByte(), p[1].toByte(), p[1].toByte(), p[2].toByte(), p[3].toByte())
+    }
+
+    /** Core mapping. [clearHum] adds the gentle all-clear hum (logical packet) when true. */
+    private fun compute(scene: SceneState, clearHum: Boolean): List<Int> {
         var l = intensity(scene.depth.left)
         var c = intensity(scene.depth.center)
         var r = intensity(scene.depth.right)
@@ -79,8 +95,9 @@ object BeltMapper {
             r = 0
         }
 
-        // Nothing firing and the scene is genuinely clear: gentle all-clear hum.
-        if (l == 0 && c == 0 && r == 0 && pattern == PATTERN_STEADY && scene.pathClear) {
+        // Nothing firing and the scene is genuinely clear: gentle all-clear hum
+        // (logical packet only; the belt stays silent so direction reads cleanly).
+        if (clearHum && l == 0 && c == 0 && r == 0 && pattern == PATTERN_STEADY && scene.pathClear) {
             l = CLEAR_HUM
             c = CLEAR_HUM
             r = CLEAR_HUM
