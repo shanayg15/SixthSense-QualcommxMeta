@@ -85,6 +85,7 @@ Handled only by `app/src/debug/.../DebugReceiver.kt`:
 - `com.sixthsense.DEBUG_BELT` — extras `l`, `c`, `r` (int 0–255), `p` (int 0–2)
 - `com.sixthsense.DEBUG_MOCK` — extra `enabled` (bool)
 - `com.sixthsense.DEBUG_ASK` — extra `q` (string question)
+- `com.sixthsense.DEBUG_HAPTICS` — extra `enabled` (bool)
 
 ## Log tags
 
