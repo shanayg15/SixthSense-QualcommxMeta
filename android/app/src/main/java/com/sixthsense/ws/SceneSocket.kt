@@ -36,10 +36,10 @@ class SceneSocket(
     @Volatile private var latestRotation: Int = 0
     @Volatile private var latestVoice: JsonObject? = null
 
-    /** Build the outgoing JSON: SceneState + optional `frame`/`frameRotation` + optional `voice`. */
-    private fun currentJson(): String {
+    /** Build outgoing JSON: SceneState (+ `voice`) and, only when [includeFrame], the camera frame. */
+    private fun currentJson(includeFrame: Boolean): String {
         val obj = gson.toJsonTree(bus.state.value).asJsonObject
-        latestFrame?.let {
+        if (includeFrame) latestFrame?.let {
             obj.addProperty("frame", it)
             obj.addProperty("frameRotation", latestRotation)
         }
@@ -50,16 +50,20 @@ class SceneSocket(
     /** True when at least one dashboard client is connected. */
     fun hasClients(): Boolean = connections.isNotEmpty()
 
-    /** Serialize + broadcast only when a dashboard is actually watching. */
+    /**
+     * Broadcast the scene WITHOUT the frame (keeps per-update WS traffic tiny). The camera
+     * frame rides its own [pushFrame] broadcast, so it isn't duplicated on every SceneState
+     * update — the dashboard keeps the last frame it received.
+     */
     private fun broadcastIfClients() {
-        if (connections.isNotEmpty()) broadcastSafe(currentJson())
+        if (connections.isNotEmpty()) broadcastSafe(currentJson(includeFrame = false))
     }
 
     /** Push a base64 JPEG camera frame (from [com.sixthsense.vision.VisionPipeline]). */
     fun pushFrame(base64Jpeg: String, rotationDegrees: Int = 0) {
         latestFrame = base64Jpeg
         latestRotation = rotationDegrees
-        broadcastIfClients()
+        if (connections.isNotEmpty()) broadcastSafe(currentJson(includeFrame = true))
     }
 
     /** Push a voice interaction so the dashboard can show what the agent answered. */
@@ -112,7 +116,7 @@ class SceneSocket(
     override fun onOpen(conn: WebSocket?, handshake: ClientHandshake?) {
         Log.i(TAG, "Dashboard connected: ${conn?.remoteSocketAddress}")
         // Send the current scene (+ latest frame/voice) immediately so the UI populates on connect.
-        conn?.send(currentJson())
+        conn?.send(currentJson(includeFrame = true))
     }
 
     override fun onClose(conn: WebSocket?, code: Int, reason: String?, remote: Boolean) {

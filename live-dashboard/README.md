@@ -10,19 +10,44 @@ there's no device, it says so.
 - **Plain HTML / CSS / JS.** No React, no build step, no dependencies, no web
   fonts. Salesforce Lightning theme (white/blue), square corners, flat fills.
 
-## Deploy
+## Run it (one command)
 
-It's a static site — host it anywhere or run it locally:
+```bash
+scripts/dashboard.sh          # USB demo: adb forward :8080, serve, open browser
+scripts/dashboard.sh --fake   # no phone: drive it from the dev "fake phone" feeder
+```
+
+`dashboard.sh` serves this folder and, for the USB demo, runs
+`adb forward tcp:8080 tcp:8080` so the phone's WebSocket is reachable at
+`ws://localhost:8080` — **this works in airplane mode** (the cable, not Wi-Fi,
+carries it). The default Device address is now `ws://localhost:8080` to match.
+
+In the app, tap **Start vision** so the phone begins streaming camera frames.
+
+### Manual / Wi-Fi
+
+It's a plain static site, so you can also host it yourself:
 
 ```bash
 cd live-dashboard
 python3 -m http.server 5173      # → http://127.0.0.1:5173
-# or: any static host (Netlify / Vercel / GitHub Pages / nginx)
+# or any static host (Netlify / Vercel / GitHub Pages / nginx)
 ```
 
-Set the **Device** address (top-left) to the phone's WebSocket, e.g.
-`ws://192.168.1.50:8080`, and press **Connect**. The address is saved and the
-dashboard **auto-connects and auto-reconnects** if the link drops.
+For a **Wi-Fi / phone-hotspot** demo (no cable), set the **Device** box to the
+phone's LAN IP, e.g. `ws://192.168.1.50:8080`, and press **Connect**. The address
+is saved and the dashboard **auto-connects and auto-reconnects** if the link drops.
+
+### Dry run with no device
+
+`dev/fake-phone.mjs` is a zero-dependency stand-in for the phone: it speaks the
+exact same WebSocket protocol and streams a synthetic animated scene (a moving
+object with **real box coords**) so you can see the whole dashboard working —
+camera frame, detection boxes, depth, path, belt — before plugging in the S25.
+
+```bash
+node live-dashboard/dev/fake-phone.mjs   # ws://localhost:8080, then Connect
+```
 
 > **HTTP vs HTTPS:** browsers block `ws://` from an `https://` page. For the LAN
 > demo, serve the dashboard over `http://` (or `file://`) and use a `ws://`
@@ -59,6 +84,12 @@ Android app now sends:
 - `frame` — base64 JPEG (or a `data:` URL) of the current camera frame.
 - `frameRotation` — degrees (0/90/180/270) the dashboard rotates the frame, so
   the phone sends the JPEG unrotated (no extra encode pass on-device).
+- `objects[].box` — `{ x1, y1, x2, y2 }`, the **real** YOLO box normalized to
+  `[0,1]` of the (upright) frame. The dashboard draws it pixel-accurate on the
+  live frame, colored green→amber→red by `nearness` (red at ≥0.70 — the same
+  threshold at which the phone reddens the box and the belt buzzes). When a
+  producer omits `box` (e.g. mock data), the dashboard falls back to a synthetic
+  placement from `zone` + `nearness`.
 - `voice` — the agent's last interaction (optional).
 
 ## Phone side (wired in the Android app)

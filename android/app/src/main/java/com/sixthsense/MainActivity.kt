@@ -67,6 +67,13 @@ class MainActivity : AppCompatActivity() {
         else toast("Camera permission denied — the full test run needs the camera.")
     }
 
+    private val requestMic = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) startVoiceAsk()
+        else toast("Microphone permission denied — voice ask needs the mic.")
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         AppGraph.init(this)
@@ -79,7 +86,12 @@ class MainActivity : AppCompatActivity() {
         // forwards each interaction. One camera owner — no second CameraX binding.
         AppGraph.visionPipeline.onFrame = { b64, rot -> socket?.pushFrame(b64, rot) }
         AppGraph.visionPipeline.shouldStreamFrame = { socket?.hasClients() == true }
-        AppGraph.voiceAgent.onAnswer = { q, intent, a -> socket?.updateVoice(q, intent, a) }
+        AppGraph.voiceAgent.onAnswer = { q, intent, a ->
+            socket?.updateVoice(q, intent, a)
+            AppGraph.tts.speak(a)   // speak the agent's answer (on-device TTS)
+        }
+        // Spoken "read that sign" runs live on-device OCR on the current frame.
+        AppGraph.voiceAgent.ocrRunner = { result -> runOcr(result) }
     }
 
     private fun buildUi(): ScrollView {
@@ -144,6 +156,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(button(getString(R.string.btn_start_vision)) { connectCameraAndStart() })
         root.addView(button(getString(R.string.btn_stop_vision)) {
             AppGraph.visionPipeline.stop()
+            clearScene()
         })
         hapticsButton = button(getString(R.string.btn_haptics_off)) { togglePhoneHaptics() }
         root.addView(hapticsButton)
@@ -155,14 +168,15 @@ class MainActivity : AppCompatActivity() {
         root.addView(button(getString(R.string.btn_mock_off)) {
             AppGraph.mockSceneProducer.setEnabled(false)
         })
+        // 4-motor belt bring-up tests: [LEFT, CENTER_L, CENTER_R, RIGHT, pattern].
         root.addView(button(getString(R.string.btn_test_left)) {
-            AppGraph.beltClient.send(byteArrayOf(200.toByte(), 0, 0, 0))
+            AppGraph.beltClient.send(byteArrayOf(200.toByte(), 0, 0, 0, 0))
         })
         root.addView(button(getString(R.string.btn_test_center)) {
-            AppGraph.beltClient.send(byteArrayOf(0, 200.toByte(), 0, 0))
+            AppGraph.beltClient.send(byteArrayOf(0, 200.toByte(), 200.toByte(), 0, 0)) // both center
         })
         root.addView(button(getString(R.string.btn_test_right)) {
-            AppGraph.beltClient.send(byteArrayOf(0, 0, 200.toByte(), 0))
+            AppGraph.beltClient.send(byteArrayOf(0, 0, 0, 200.toByte(), 0))
         })
         root.addView(button(getString(R.string.btn_ask)) {
             // Uses the on-device Qwen LLM when ready (falls back to rule-based);
@@ -173,6 +187,10 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread { toast(answer) }
             }
         })
+        // On-device OCR (ML Kit) — read text in the current frame, spoken + on the dashboard.
+        root.addView(button("🔎 Read Text (OCR)") { readTextOcr() })
+        // On-device push-to-talk: Android speech recognizer -> agent -> spoken answer.
+        root.addView(button("🎤 Voice Ask (push-to-talk)") { voiceAsk() })
 
         sceneView = TextView(this).apply {
             text = getString(R.string.scene_waiting)
@@ -199,6 +217,73 @@ class MainActivity : AppCompatActivity() {
         AppGraph.visionPipeline.start(this, previewView)
     }
 
+    /** Run on-device OCR on the latest frame, publish the text on the scene (so the
+     *  dashboard shows it), then call [onText] on the main thread. "" if no frame yet. */
+    private fun runOcr(onText: (String) -> Unit) {
+        val frame = AppGraph.visionPipeline.lastFrame()
+        if (frame == null) {
+            onText("")
+            return
+        }
+        AppGraph.ocrEngine.recognize(frame) { text ->
+            runOnUiThread {
+                val current = AppGraph.sceneBus.state.value
+                AppGraph.sceneBus.emit(
+                    current.copy(
+                        ts = System.currentTimeMillis(),
+                        ocr = com.sixthsense.core.Ocr(present = text.isNotBlank(), text = text),
+                    )
+                )
+                onText(text)
+            }
+        }
+    }
+
+    /** OCR button: recognize text in the current frame, then speak it. */
+    private fun readTextOcr() {
+        if (AppGraph.visionPipeline.lastFrame() == null) {
+            toast("Start live vision first.")
+            return
+        }
+        toast("Reading text…")
+        runOcr { text ->
+            val spoken = if (text.isBlank()) "I don't see readable text." else "The sign says: $text"
+            AppGraph.tts.speak(spoken)
+            toast(spoken)
+        }
+    }
+
+    /** Push-to-talk: on-device speech -> voice agent -> spoken answer (TTS via onAnswer). */
+    private fun voiceAsk() {
+        if (!AppGraph.speechInput.available()) {
+            toast("On-device speech recognition isn't available on this device.")
+            return
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            == PackageManager.PERMISSION_GRANTED
+        ) {
+            startVoiceAsk()
+        } else {
+            requestMic.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    private fun startVoiceAsk() {
+        toast("Listening…")
+        AppGraph.speechInput.listen(
+            onResult = { transcript ->
+                if (transcript.isBlank()) {
+                    toast("Didn't catch that — try again.")
+                    return@listen
+                }
+                toast("You: $transcript")
+                // onAnswer (wired in onCreate) speaks the reply via TTS + updates the dashboard.
+                AppGraph.voiceAgent.askAsync(transcript) { answer -> Log.i(TAG, "Voice A='$answer'") }
+            },
+            onError = { msg -> runOnUiThread { toast(msg) } },
+        )
+    }
+
     /** One button: enter/exit a full test run (camera + detection + phone haptics). */
     private fun toggleFullTestRun() {
         if (testRunActive) {
@@ -215,20 +300,36 @@ class MainActivity : AppCompatActivity() {
     private fun startFullTestRun() {
         testRunActive = true
         AppGraph.visionPipeline.start(this, previewView)
-        AppGraph.phoneHaptics.setEnabled(true)
         testRunButton.text = getString(R.string.btn_test_run_stop)
-        hapticsButton.text = getString(R.string.btn_haptics_on)
-        if (!AppGraph.phoneHaptics.hasVibrator()) toast("This device has no vibration motor.")
-        toast("Test run on — approach an object; the phone buzzes toward it.")
+        // The 4-motor belt (auto-driven when connected) is the primary haptic; only
+        // fall back to the phone when there's no belt, so they don't double-buzz.
+        if (AppGraph.beltClient.isConnected) {
+            toast("Test run — belt buzzes toward objects (LEFT / ahead / RIGHT).")
+        } else {
+            AppGraph.phoneHaptics.setEnabled(true)
+            hapticsButton.text = getString(R.string.btn_haptics_on)
+            toast(
+                if (AppGraph.phoneHaptics.hasVibrator()) "Test run — no belt; the phone buzzes toward objects."
+                else "Test run on (no belt and no phone vibrator)."
+            )
+        }
     }
 
     private fun stopFullTestRun() {
         testRunActive = false
         AppGraph.phoneHaptics.setEnabled(false)
         AppGraph.visionPipeline.stop()
+        clearScene()  // quiet the belt/phone
         testRunButton.text = getString(R.string.btn_test_run_start)
         hapticsButton.text = getString(R.string.btn_haptics_off)
         toast("Test run off.")
+    }
+
+    /** Emit a clear scene so the belt + phone stop buzzing when vision is stopped. */
+    private fun clearScene() {
+        AppGraph.sceneBus.emit(
+            com.sixthsense.core.SceneBus.SAFE_DEFAULT.copy(ts = System.currentTimeMillis())
+        )
     }
 
     private fun togglePhoneHaptics() {
@@ -257,9 +358,10 @@ class MainActivity : AppCompatActivity() {
             AppGraph.sceneBus.state.collectLatest { scene ->
                 sceneView.text = render(scene)
                 overlay.setDetections(scene.objects)
-                // A "red" (too-close) object fires a directional phone buzz. Skipped when
-                // the full test-mode controller is already driving the motor from the bus.
-                if (!AppGraph.phoneHaptics.isEnabled()) {
+                // Haptics priority: the 4-motor belt (driven live by BeltController when
+                // connected) is primary. Only fall back to a phone proximity buzz when no
+                // belt is connected and phone test-mode isn't already driving the motor.
+                if (!AppGraph.beltClient.isConnected && !AppGraph.phoneHaptics.isEnabled()) {
                     AppGraph.phoneHaptics.driveOnce(proximityPacket(scene))
                 }
             }
@@ -297,8 +399,8 @@ class MainActivity : AppCompatActivity() {
     private fun render(s: SceneState): String {
         val summary = buildString {
             append("mock=${AppGraph.mockSceneProducer.isEnabled()}  ")
-            append("haptics=${AppGraph.phoneHaptics.isEnabled()}  ")
-            append("belt=${AppGraph.beltClient.isConnected}\n")
+            append("phoneHaptics=${AppGraph.phoneHaptics.isEnabled()}  ")
+            append("belt=${AppGraph.beltClient.isConnected} drive=${AppGraph.beltHaptics.isEnabled()}\n")
             append("zones L/C/R = %.2f / %.2f / %.2f\n".format(s.depth.left, s.depth.center, s.depth.right))
             append("pathClear=${s.pathClear}  conf=%.2f\n".format(s.conf))
             append("belt packet=${s.belt}\n")
@@ -318,9 +420,14 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         socket?.shutdown()
+        AppGraph.speechInput.shutdown()   // release the recognizer (recreated on next ask)
         // CameraX unbinds with the lifecycle automatically; fully stop the pipeline
         // (close models, free the executor's work) only when the app is finishing.
-        if (isFinishing) AppGraph.visionPipeline.stop()
+        if (isFinishing) {
+            AppGraph.visionPipeline.stop()
+            AppGraph.tts.shutdown()
+            AppGraph.ocrEngine.close()
+        }
         super.onDestroy()
     }
 

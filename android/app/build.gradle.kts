@@ -83,6 +83,10 @@ dependencies {
     // JSON
     implementation("com.google.code.gson:gson:2.11.0")
 
+    // On-device OCR — ML Kit bundled Latin text-recognition model (no Play Services
+    // download, works offline / airplane mode).
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+
     // WebSocket server for the dashboard bridge
     implementation("org.java-websocket:Java-WebSocket:1.5.7")
 

@@ -1,74 +1,83 @@
-# SixthSense Belt Firmware (ESP32 + NimBLE)
+# SixthSense Belt Firmware (ESP32 + NimBLE) — 4-motor waist belt
 
-The belt is a **dumb actuator**: it accepts a 4-byte BLE packet and drives three
-vibration motors. No AI, no navigation, no Wi-Fi.
+The belt is a **dumb actuator**: it accepts a **5-byte** BLE packet and drives
+**four** vibration motors arranged around the waist. No AI, no navigation, no Wi-Fi.
+
+**Layout — the side where the obstacle is, is what buzzes:**
+
+```
+        front of waist
+   [CENTER_L][CENTER_R]      <- both buzz for an obstacle STRAIGHT AHEAD
+ [LEFT]                [RIGHT]
+   ^ obstacle on the left      ^ obstacle on the right
+```
+
+Packet `[m0, m1, m2, m3, pattern]` (each intensity 0..255):
+`m0 = LEFT`, `m1 = CENTER_L`, `m2 = CENTER_R`, `m3 = RIGHT`,
+`pattern: 0 steady · 1 caution pulse · 2 double pulse (curb/step)`.
+The phone sets `CENTER_L == CENTER_R`, so "ahead" lights both center motors.
 
 ## Arduino IDE setup
 
 1. Install the **Arduino IDE** (2.x).
-2. Add the **ESP32 board package**:
-   - Arduino IDE → **Settings** → *Additional boards manager URLs*:
-     `https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json`
-   - **Tools → Board → Boards Manager** → search **esp32** → install *"esp32 by Espressif Systems"*.
-3. Install the BLE library:
-   - **Tools → Manage Libraries** → search **NimBLE-Arduino** → install (by h2zero).
-4. Select your board under **Tools → Board → ESP32 Arduino** (e.g. *ESP32 Dev Module*),
-   pick the serial **Port**, and set **Upload Speed** to 921600 (or 115200 if it fails).
+2. Add the **ESP32 board package** (Settings → *Additional boards manager URLs*):
+   `https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json`
+   then **Tools → Board → Boards Manager** → install *"esp32 by Espressif Systems"* (core **3.x**).
+3. **Tools → Manage Libraries** → install **NimBLE-Arduino** (by h2zero). The sketch targets
+   the **2.x API** (`onWrite(..., NimBLEConnInfo&)`, `enableScanResponse`, `setPower(dBm)`).
+4. **Tools → Board → ESP32 Arduino → ESP32 Dev Module**, pick the **Port**, Upload Speed 921600
+   (or 115200 if it fails).
 
-> `analogWrite()` is used for PWM so the sketch works on both ESP32 Arduino core
-> 2.x and 3.x. If you prefer explicit LEDC control, swap to `ledcSetup`/`ledcWrite`
-> (core 2.x) or `ledcAttach`/`ledcWrite` (core 3.x).
+> `analogWrite()` is used for PWM (works on ESP32 Arduino core 3.x). For explicit LEDC,
+> swap to `ledcAttach`/`ledcWrite`.
 
-## Wiring table (3 motors via ULN2803A)
+## Hardware: "PWM Vibration Motor Switch Module, DC 5V" (driver-included)
 
-| Signal | ESP32 | ULN2803A | Motor / Power |
+These modules have an **onboard driver transistor** (3 pins: VCC / GND / SIG), so you
+drive each one **directly from a GPIO** — **no ULN2803A / MOSFET needed**. PWM on SIG
+sets intensity.
+
+| Module | ESP32 GPIO (SIG) | VCC | GND |
 |---|---|---|---|
-| Left motor PWM | GPIO 25 | IN 1 (pin 1) | — |
-| Center motor PWM | GPIO 26 | IN 2 (pin 2) | — |
-| Right motor PWM | GPIO 27 | IN 3 (pin 3) | — |
-| Left motor drive | — | OUT 1 (pin 18) | Left motor (−) |
-| Center motor drive | — | OUT 2 (pin 17) | Center motor (−) |
-| Right motor drive | — | OUT 3 (pin 16) | Right motor (−) |
-| Motor V+ | — | COM (pin 10) | All motors (+) and supply + |
-| Ground | GND | GND (pin 9) | Supply − |
+| LEFT (m0) | GPIO 25 | 5V rail | common GND |
+| CENTER_L (m1) | GPIO 26 | 5V rail | common GND |
+| CENTER_R (m2) | GPIO 27 | 5V rail | common GND |
+| RIGHT (m3) | GPIO 33 | 5V rail | common GND |
 
-Pin numbers above are the standard ULN2803A DIP pinout (inputs 1–8 on pins 1–8,
-outputs on pins 18–11, COM = pin 10, GND = pin 9).
-
-### ULN2803A notes
-- **Never** connect a vibration motor straight to a GPIO pin. GPIOs source only a
-  few mA and the motor's inductive kickback can destroy the pin.
-- The ULN2803A is an open-collector sink array: the motor's **+** goes to V+, its
-  **−** goes to a ULN2803A output, and the ESP32 GPIO drives the matching input.
-- Tie **COM (pin 10) to motor V+** so the internal clamp diodes have a return path
-  for inductive spikes.
-- **Common ground is mandatory**: ESP32 GND, ULN2803A GND, and motor-supply GND
-  must all be tied together.
-- Many blue "vibration motor modules" already include a driver transistor — if so,
-  you can drive the module's `IN` directly from a GPIO. Verify before wiring.
-- Power motors from a USB power bank / battery rail, not the ESP32 3.3V pin, unless
-  the current draw is small and tested.
+### Power & wiring notes
+- **VCC = 5V**: power the modules from the ESP32 **5V/VIN** (USB) or a **USB power bank**
+  for the wearable run. Four motors can pull a few hundred mA — give the rail headroom.
+- **Common ground is mandatory**: every module GND ties to ESP32 GND.
+- **GPIO logic is 3.3V**; these modules switch fine from 3.3V. If a specific module needs
+  5V logic on SIG, add a level shifter on that line.
+- Avoid ESP32 strapping pins (0, 2, 12, 15) and input-only pins (34–39) for the motor SIGs.
 
 ## Test packet examples
 
-`[m0, m1, m2, pattern]`
+`[m0, m1, m2, m3, pattern]`
 
 | Packet (hex) | Meaning |
 |---|---|
-| `C8 00 00 00` | strong **left** buzz, steady |
-| `00 B4 00 02` | center **double pulse** — curb/step ahead |
-| `00 00 DC 00` | strong **right** buzz, steady |
-| `1E 1E 1E 00` | low **all-clear** hum on all motors |
-| `00 50 00 01` | low-confidence **caution pulse** (center) |
+| `C8 00 00 00 00` | strong **LEFT** buzz, steady |
+| `00 C8 C8 00 00` | **AHEAD** — both center motors, steady |
+| `00 00 00 C8 00` | strong **RIGHT** buzz, steady |
+| `00 B4 B4 00 02` | center **double pulse** — curb/step ahead |
+| `00 50 50 00 01` | low-confidence **caution pulse** (center) |
 
 ## Testing with nRF Connect (before the Android app)
 
 1. Flash this sketch; open **Serial Monitor** at 115200 to see logs.
-2. In **nRF Connect** (mobile), scan and find **`SixthSense-Belt`**; tap **Connect**.
-3. Expand the service `6e400001-…` and find characteristic `6e400002-…`.
-4. Tap the **write** (up-arrow) icon, choose **Byte Array**, and send e.g. `C8000000`.
-5. Confirm the left motor buzzes; try `00B40002` for the center double-pulse.
-6. Vary the first three bytes to confirm PWM intensity changes motor strength.
+2. In **nRF Connect** (mobile), scan, find **`SixthSense-Belt`**, tap **Connect**.
+3. Expand service `6e400001-…`, find characteristic `6e400002-…`.
+4. Tap **write** (up-arrow), choose **Byte Array**, and send one of (5 bytes = 10 hex chars):
+   `C800000000` = LEFT · `00C8C80000` = AHEAD (both center) · `000000C800` = RIGHT.
+5. Confirm the right motor(s) buzz; vary the bytes to confirm PWM intensity + patterns.
+
+> **Text-only nRF Connect builds:** some versions have no Byte Array / hex format selector
+> and send the value as UTF-8 text (so `C800000000` arrives as the literal characters). The
+> firmware tolerates this: `onWrite` accepts **either** the 5 raw bytes **or** a 10-char
+> ASCII-hex string, so you can type `C800000000` into a text field and it still works. The
+> canonical Android `BeltClient` path always sends raw bytes.
 
 Firmware test ladder: blink → BLE advertise → appears in nRF Connect → write packet →
-correct motor buzz → intensity scales → patterns work → Android app connects & writes.
+correct motor buzzes → intensity scales → patterns work → Android app connects & writes.

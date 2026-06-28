@@ -29,6 +29,13 @@ class VoiceAgent(
      */
     var onAnswer: ((String, String, String) -> Unit)? = null
 
+    /**
+     * Optional on-device OCR runner: runs text recognition on the CURRENT camera frame
+     * and returns the recognized text. Wired in MainActivity (ML Kit) so the spoken
+     * "read that sign" intent actually runs OCR live instead of reading a stale result.
+     */
+    var ocrRunner: ((result: (String) -> Unit) -> Unit)? = null
+
     private val genExecutor = Executors.newSingleThreadExecutor()
 
     /**
@@ -39,6 +46,17 @@ class VoiceAgent(
     fun askAsync(question: String, onResult: (String) -> Unit = {}) {
         val scene = bus.state.value
         val intent = route(question)
+        // "Read that sign": run on-device OCR FRESH on the current frame, then answer.
+        val ocr = ocrRunner
+        if (intent == Intent.OCR && ocr != null) {
+            ocr { text ->
+                val answer = if (text.isNotBlank()) "The sign says: $text." else "I don't see readable text."
+                Log.i(TAG, "Q='$question' -> A(ocr)='$answer'")
+                onAnswer?.invoke(question, intent.name, answer)
+                onResult(answer)
+            }
+            return
+        }
         val engine = llm
         if (intent != Intent.SCENE || engine == null || !engine.isReady) {
             val a = ask(question)

@@ -7,6 +7,9 @@
     <!-- Phone's own vibration motor for the directional haptics test mode. -->
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- Microphone for on-device push-to-talk speech recognition (offline). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
     <!-- INTERNET is for the LOCAL dashboard WebSocket only (no cloud). -->
     <uses-permission android:name="android.permission.INTERNET" />
 
