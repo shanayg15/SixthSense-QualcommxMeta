@@ -18,7 +18,14 @@
   var STALE_MS = 4000;             // no frame for this long => "signal lost"
   var VOICE_HOLD_MS = 6000;        // how long a device voice event stays "active"
   var LS_URL = "sixthsense.deviceUrl";
-  var DEFAULT_URL = "ws://192.168.1.50:8080";
+  // Demo-safe default: with `adb forward tcp:8080 tcp:8080` (USB, works in
+  // airplane mode) the phone's WebSocket is reachable at localhost. For a Wi-Fi /
+  // hotspot demo, override with the phone's LAN IP, e.g. ws://192.168.1.50:8080.
+  var DEFAULT_URL = "ws://localhost:8080";
+
+  // Object-box colors mirror the phone's DetectionOverlayView thresholds so the
+  // dashboard turns a box red at exactly the nearness the belt starts buzzing.
+  var BOX_RED = 0.70, BOX_YELLOW = 0.45;
 
   // BeltMapper.kt constants (device computes belt; we only fall back if omitted).
   var NEAR = 0.55, LOW_CONF = 0.40, CLEAR_HUM = 30, CURB_CENTER_MIN = 180, CAUTION_CENTER = 80;
@@ -77,6 +84,17 @@
   function rgba(hex, a) { var h = hex.replace("#", ""); return "rgba(" + parseInt(h.substr(0, 2), 16) + "," + parseInt(h.substr(2, 2), 16) + "," + parseInt(h.substr(4, 2), 16) + "," + a + ")"; }
   function live() { return state.status === "live"; }
   function fresh() { return live() && state.lastFrameAt && (perf() - state.lastFrameAt) < STALE_MS; }
+  // Real YOLO box from the device: normalized [0,1] xyxy of the upright frame, or
+  // null. Validated so a malformed box falls back to the synthetic placement.
+  function normBox(b) {
+    if (!b || typeof b !== "object") return null;
+    var x1 = num(b.x1, NaN), y1 = num(b.y1, NaN), x2 = num(b.x2, NaN), y2 = num(b.y2, NaN);
+    if (!isFinite(x1) || !isFinite(y1) || !isFinite(x2) || !isFinite(y2)) return null;
+    if (x2 <= x1 || y2 <= y1) return null;
+    return { x1: clamp(x1, 0, 1), y1: clamp(y1, 0, 1), x2: clamp(x2, 0, 1), y2: clamp(y2, 0, 1) };
+  }
+  // Box outline color: matches DetectionOverlayView.kt (red ⇒ "too close" ⇒ belt buzzes).
+  function boxColorFor(n) { return n >= BOX_RED ? C.red : n >= BOX_YELLOW ? C.amber : C.green; }
 
   // ---------------------------------------------- BeltMapper.kt fallback ----
   var NEAR_F = Math.fround(NEAR);
@@ -107,7 +125,7 @@
       ts: num(raw.ts, 0),
       depth: { left: num(d.left, 0), center: num(d.center, 0), right: num(d.right, 0), curbAhead: !!d.curbAhead, stepDown: !!d.stepDown },
       objects: Array.isArray(raw.objects) ? raw.objects.map(function (o) {
-        return { label: String(o.label || "object"), zone: String(o.zone || "center"), nearness: num(o.nearness, 0), conf: num(o.conf, 0) };
+        return { label: String(o.label || "object"), zone: String(o.zone || "center"), nearness: num(o.nearness, 0), conf: num(o.conf, 0), box: normBox(o.box) };
       }) : [],
       pathClear: !!raw.pathClear,
       ocr: { present: !!(raw.ocr && raw.ocr.present), text: (raw.ocr && raw.ocr.text) ? String(raw.ocr.text) : "" },
@@ -317,6 +335,29 @@
     ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh); ctx.restore();
     return true;
   }
+  // Returns fn(nx, ny) -> {x, y}: maps a normalized [0,1] point of the device frame
+  // to canvas pixels using the EXACT same cover-fit + rotation as drawFrame(), so a
+  // box drawn through it lands pixel-accurate on the object. null if no frame yet.
+  function frameMapper(W, H) {
+    if (!(state.frameReady && state.frameImg)) return null;
+    var img = state.frameImg, iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+    if (!iw || !ih) return null;
+    var deg = ((state.frameRotation % 360) + 360) % 360;
+    var ew = (deg === 90 || deg === 270) ? ih : iw, eh = (deg === 90 || deg === 270) ? iw : ih;
+    var scale = Math.max(W / ew, H / eh), dw = iw * scale, dh = ih * scale;
+    var rad = deg * Math.PI / 180, cos = Math.cos(rad), sin = Math.sin(rad);
+    return function (nx, ny) {
+      var lx = -dw / 2 + nx * dw, ly = -dh / 2 + ny * dh;
+      return { x: W / 2 + lx * cos - ly * sin, y: H / 2 + lx * sin + ly * cos };
+    };
+  }
+  // Map a normalized box -> axis-aligned canvas rect (corners stay axis-aligned for
+  // the 0/90/180/270 rotations the device sends).
+  function boxRect(map, b) {
+    var p1 = map(b.x1, b.y1), p2 = map(b.x2, b.y2);
+    var x = Math.min(p1.x, p2.x), y = Math.min(p1.y, p2.y);
+    return { x: x, y: y, w: Math.abs(p2.x - p1.x), h: Math.abs(p2.y - p1.y) };
+  }
   function centerMsg(ctx, W, H, big, small, color) {
     ctx.textAlign = "center";
     ctx.font = "700 22px " + FONT; ctx.fillStyle = color || "#9fb0c7"; ctx.fillText(big, W / 2, H / 2 - 4);
@@ -347,10 +388,17 @@
       ctx.beginPath(); ctx.moveTo(colW, 0); ctx.lineTo(colW, H); ctx.moveTo(2 * colW, 0); ctx.lineTo(2 * colW, H); ctx.stroke();
     }
     if (L.detection) {
+      var map = drew ? frameMapper(W, H) : null;
       s.objects.forEach(function (o) {
-        var r = objRect(o.zone, o.nearness, W, H), col = heatColor(o.nearness);
-        ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.strokeRect(r.x, r.y, r.w, r.h);
-        label(ctx, r.x, r.y - 5, o.label + " · " + o.nearness.toFixed(2) + " · " + pct(o.conf) + "%", col, 12, "rgba(255,255,255,0.92)");
+        // Real YOLO box on the live frame when available; synthetic placement only
+        // as a fallback (mock data / before the first frame arrives).
+        var r = (o.box && map) ? boxRect(map, o.box) : objRect(o.zone, o.nearness, W, H);
+        var col = boxColorFor(o.nearness), close = o.nearness >= BOX_RED;
+        if (close) { ctx.fillStyle = rgba(col, 0.16); ctx.fillRect(r.x, r.y, r.w, r.h); }
+        ctx.strokeStyle = col; ctx.lineWidth = close ? 3 : 2; ctx.strokeRect(r.x, r.y, r.w, r.h);
+        var tag = o.label + " · " + o.nearness.toFixed(2) + " · " + pct(o.conf) + "%" + (close ? "  ⚠ CLOSE" : "");
+        var ly = r.y > 16 ? r.y - 5 : r.y + r.h + 14;   // keep the label on-screen
+        label(ctx, r.x, ly, tag, close ? C.white : col, 12, close ? rgba(C.red, 0.92) : "rgba(255,255,255,0.92)");
       });
     }
     if (L.ocr && s.ocr.present && s.ocr.text) {
