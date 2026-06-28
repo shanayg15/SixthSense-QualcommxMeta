@@ -67,6 +67,13 @@ class MainActivity : AppCompatActivity() {
         else toast("Camera permission denied — the full test run needs the camera.")
     }
 
+    private val requestMic = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) startVoiceAsk()
+        else toast("Microphone permission denied — voice ask needs the mic.")
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         AppGraph.init(this)
@@ -79,7 +86,10 @@ class MainActivity : AppCompatActivity() {
         // forwards each interaction. One camera owner — no second CameraX binding.
         AppGraph.visionPipeline.onFrame = { b64, rot -> socket?.pushFrame(b64, rot) }
         AppGraph.visionPipeline.shouldStreamFrame = { socket?.hasClients() == true }
-        AppGraph.voiceAgent.onAnswer = { q, intent, a -> socket?.updateVoice(q, intent, a) }
+        AppGraph.voiceAgent.onAnswer = { q, intent, a ->
+            socket?.updateVoice(q, intent, a)
+            AppGraph.tts.speak(a)   // speak the agent's answer (on-device TTS)
+        }
     }
 
     private fun buildUi(): ScrollView {
@@ -175,6 +185,10 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread { toast(answer) }
             }
         })
+        // On-device OCR (ML Kit) — read text in the current frame, spoken + on the dashboard.
+        root.addView(button("🔎 Read Text (OCR)") { readTextOcr() })
+        // On-device push-to-talk: Android speech recognizer -> agent -> spoken answer.
+        root.addView(button("🎤 Voice Ask (push-to-talk)") { voiceAsk() })
 
         sceneView = TextView(this).apply {
             text = getString(R.string.scene_waiting)
@@ -199,6 +213,62 @@ class MainActivity : AppCompatActivity() {
 
     private fun startLiveVision() {
         AppGraph.visionPipeline.start(this, previewView)
+    }
+
+    /** On-demand OCR: recognize text in the latest camera frame, speak it, and publish
+     *  it on the scene so the dashboard shows it too. */
+    private fun readTextOcr() {
+        val frame = AppGraph.visionPipeline.lastFrame()
+        if (frame == null) {
+            toast("Start live vision first.")
+            return
+        }
+        toast("Reading text…")
+        AppGraph.ocrEngine.recognize(frame) { text ->
+            runOnUiThread {
+                val current = AppGraph.sceneBus.state.value
+                AppGraph.sceneBus.emit(
+                    current.copy(
+                        ts = System.currentTimeMillis(),
+                        ocr = com.sixthsense.core.Ocr(present = text.isNotBlank(), text = text),
+                    )
+                )
+                val spoken = if (text.isBlank()) "I don't see readable text." else "The sign says: $text"
+                AppGraph.tts.speak(spoken)
+                toast(spoken)
+            }
+        }
+    }
+
+    /** Push-to-talk: on-device speech -> voice agent -> spoken answer (TTS via onAnswer). */
+    private fun voiceAsk() {
+        if (!AppGraph.speechInput.available()) {
+            toast("On-device speech recognition isn't available on this device.")
+            return
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            == PackageManager.PERMISSION_GRANTED
+        ) {
+            startVoiceAsk()
+        } else {
+            requestMic.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    private fun startVoiceAsk() {
+        toast("Listening…")
+        AppGraph.speechInput.listen(
+            onResult = { transcript ->
+                if (transcript.isBlank()) {
+                    toast("Didn't catch that — try again.")
+                    return@listen
+                }
+                toast("You: $transcript")
+                // onAnswer (wired in onCreate) speaks the reply via TTS + updates the dashboard.
+                AppGraph.voiceAgent.askAsync(transcript) { answer -> Log.i(TAG, "Voice A='$answer'") }
+            },
+            onError = { msg -> runOnUiThread { toast(msg) } },
+        )
     }
 
     /** One button: enter/exit a full test run (camera + detection + phone haptics). */
@@ -337,9 +407,14 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         socket?.shutdown()
+        AppGraph.speechInput.shutdown()   // release the recognizer (recreated on next ask)
         // CameraX unbinds with the lifecycle automatically; fully stop the pipeline
         // (close models, free the executor's work) only when the app is finishing.
-        if (isFinishing) AppGraph.visionPipeline.stop()
+        if (isFinishing) {
+            AppGraph.visionPipeline.stop()
+            AppGraph.tts.shutdown()
+            AppGraph.ocrEngine.close()
+        }
         super.onDestroy()
     }
 

@@ -101,6 +101,11 @@ class VisionPipeline(
     @Volatile private var cachedDepthMs = 0.0
     @Volatile private var latestObjects: List<DetectedObj> = emptyList()
     @Volatile private var latestYoloMs = 0.0
+    // Latest upright frame, kept for on-demand OCR (read-only; replaced each frame).
+    @Volatile private var lastUpright: Bitmap? = null
+
+    /** The most recent upright camera frame, for on-demand OCR (null until vision runs). */
+    fun lastFrame(): Bitmap? = lastUpright
 
     /** Dashboard frame sink: a downscaled base64 JPEG of the live camera + its rotation. */
     var onFrame: ((String, Int) -> Unit)? = null
@@ -250,6 +255,7 @@ class VisionPipeline(
             // One shared, read-only upright bitmap. It is an independent copy (NOT backed by
             // the ImageProxy buffer), so the async tasks may keep reading it after image.close().
             val upright = FrameBitmap.upright(image)
+            lastUpright = upright                       // keep for on-demand OCR
             maybeStreamFrame(upright)                  // fast path: live frame every loop
             val n = frameCount++
 

@@ -7,8 +7,11 @@ import com.sixthsense.core.MockSceneProducer
 import com.sixthsense.core.SceneBus
 import com.sixthsense.haptics.PhoneHapticsActuator
 import com.sixthsense.haptics.PhoneHapticsController
+import com.sixthsense.vision.OcrEngine
 import com.sixthsense.vision.VisionPipeline
 import com.sixthsense.voice.LlmEngine
+import com.sixthsense.voice.SpeechInput
+import com.sixthsense.voice.Tts
 import com.sixthsense.voice.VoiceAgent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +42,12 @@ object AppGraph {
         private set
     lateinit var beltHaptics: BeltController
         private set
+    lateinit var ocrEngine: OcrEngine
+        private set
+    lateinit var tts: Tts
+        private set
+    lateinit var speechInput: SpeechInput
+        private set
 
     /** Background scope for producers/streams; survives Activity recreation. */
     val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -58,6 +67,10 @@ object AppGraph {
         visionPipeline = VisionPipeline(app, sceneBus)
         phoneHaptics = PhoneHapticsController(sceneBus, PhoneHapticsActuator(app), scope)
         beltHaptics = BeltController(sceneBus, beltClient, scope)
+        // Voice loop: on-device OCR (ML Kit), on-device STT (Android), and TTS out.
+        ocrEngine = OcrEngine()
+        tts = Tts(app)
+        speechInput = SpeechInput(app)
         // The 4-motor belt is the primary haptic when connected: auto-drive it from
         // the live scene on connect, stop on disconnect (firmware also zeroes motors).
         beltClient.onConnected = { beltHaptics.setEnabled(true) }

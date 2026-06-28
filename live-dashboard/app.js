@@ -49,15 +49,16 @@
   })();
 
   // The technologies actually being integrated (docs/model_export_plan.md).
+  // Only technologies that are actually WIRED and running on-device — no aspirational entries.
   var TECH = [
-    { key: "depth",   name: "Depth-Anything-V2", rt: "ExecuTorch · QNN/NPU", role: "Monocular depth → per-zone nearness" },
-    { key: "yolo",    name: "YOLOv11n / v8n",    rt: "ExecuTorch · QNN/NPU", role: "Obstacle detection & localisation" },
-    { key: "ocr",     name: "TrOCR",             rt: "ExecuTorch (ML Kit fb)", role: "Reads signs / text on demand" },
-    { key: "whisper", name: "Whisper base/small",rt: "ExecuTorch",          role: "Speech → text (push-to-talk)" },
-    { key: "llama",   name: "Llama 3.2 1B",      rt: "ExecuTorch",          role: "Voice-agent reasoning" },
-    { key: "tts",     name: "Android TextToSpeech", rt: "On-device",        role: "Speaks the agent's answer" },
-    { key: "npu",     name: "ExecuTorch runtime",rt: "Snapdragon SM8750",   role: "On-device inference · Hexagon v79 NPU" },
-    { key: "belt",    name: "BLE haptic belt",   rt: "Nordic UART · ESP32", role: "Steers via L/C/R vibration" }
+    { key: "depth", name: "Depth-Anything-V2", rt: "ExecuTorch",         role: "Monocular depth → per-zone nearness" },
+    { key: "yolo",  name: "YOLOv11n",          rt: "ExecuTorch",         role: "Obstacle detection & localisation" },
+    { key: "ocr",   name: "ML Kit OCR",        rt: "On-device · ML Kit", role: "Reads signs / text on demand" },
+    { key: "stt",   name: "On-device Speech",  rt: "Android · offline",  role: "Speech → text (push-to-talk)" },
+    { key: "llm",   name: "Qwen2.5-0.5B",      rt: "ExecuTorch",         role: "Voice-agent reasoning" },
+    { key: "tts",   name: "Text-to-Speech",    rt: "Android · on-device", role: "Speaks the agent's answer" },
+    { key: "npu",   name: "ExecuTorch runtime", rt: "Snapdragon SM8750", role: "On-device inference · Hexagon v79 NPU" },
+    { key: "belt",  name: "BLE haptic belt",   rt: "Nordic UART · ESP32", role: "Steers via L/C/R vibration" }
   ];
 
   // -------------------------------------------------------------- state -----
@@ -302,8 +303,8 @@
       depth:   { on: has && fr, out: has ? "L " + s.depth.left.toFixed(2) + " · C " + s.depth.center.toFixed(2) + " · R " + s.depth.right.toFixed(2) : "—" },
       yolo:    { on: has && s.objects.length > 0, out: !has ? "—" : s.objects.length ? s.objects.map(function (o) { return o.label + "·" + o.zone; }).join(", ") : "no objects in frame" },
       ocr:     { on: has && s.ocr.present, out: !has ? "—" : s.ocr.present ? '"' + s.ocr.text + '"' : "idle — on demand" },
-      whisper: { on: voiceOn, out: voiceOn ? '"' + state.voice.question + '"' : (has ? "push-to-talk ready" : "—") },
-      llama:   { on: voiceOn, out: voiceOn ? state.voice.answer : (has ? "awaiting a question" : "—") },
+      stt:     { on: voiceOn, out: voiceOn ? '"' + state.voice.question + '"' : (has ? "push-to-talk ready" : "—") },
+      llm:     { on: voiceOn, out: voiceOn ? state.voice.answer : (has ? "awaiting a question" : "—") },
       tts:     { on: voiceOn, out: voiceOn ? "speaking answer" : (has ? "ready" : "—") },
       npu:     { on: has && fr, out: has ? "Snapdragon 8 Elite · " + state.fps.toFixed(1) + " fps" : "—" },
       belt:    { on: beltLive, out: has ? "[" + p.join(", ") + "] · " + (p[3] === 2 ? "double" : p[3] === 1 ? "pulse" : "steady") : "—" }
