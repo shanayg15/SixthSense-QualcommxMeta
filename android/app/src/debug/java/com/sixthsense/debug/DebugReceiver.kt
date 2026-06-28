@@ -12,7 +12,7 @@ import android.util.Log
  * runtime.
  *
  * Actions:
- *   com.sixthsense.DEBUG_BELT     extras l,c,r (int 0-255), p (int 0-2)
+ *   com.sixthsense.DEBUG_BELT     extras l,c,r (int 0-255), p (int 0-3)
  *   com.sixthsense.DEBUG_MOCK     extra  enabled (bool)
  *   com.sixthsense.DEBUG_ASK      extra  q (string)
  *   com.sixthsense.DEBUG_HAPTICS  extra  enabled (bool) — phone-vibration test mode
@@ -28,7 +28,7 @@ class DebugReceiver : BroadcastReceiver() {
                 val l = clamp(intent.getIntExtra("l", 0), 0, 255)
                 val c = clamp(intent.getIntExtra("c", 0), 0, 255)
                 val r = clamp(intent.getIntExtra("r", 0), 0, 255)
-                val p = clamp(intent.getIntExtra("p", 0), 0, 2)
+                val p = clamp(intent.getIntExtra("p", 0), 0, 3)
                 val packet = byteArrayOf(l.toByte(), c.toByte(), r.toByte(), p.toByte())
                 Log.i(TAG, "DEBUG_BELT l=$l c=$c r=$r p=$p")
                 AppGraph.beltClient.send(packet)

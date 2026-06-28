@@ -13,8 +13,9 @@ import kotlin.math.max
  *   LEFT    = 1 pulse  per cycle   (· … · … ·)
  *   CENTER  = 2 pulses per cycle   (·· … ··)
  *   RIGHT   = 3 pulses per cycle   (··· … ···)
- *   CURB    = 2 hard long buzzes at full amplitude (pattern 2, overrides direction)
- *   CAUTION = 1 soft pulse, NO direction (pattern 1 / low confidence)
+ *   CURB     = 2 hard long buzzes at full amplitude (pattern 2, overrides direction)
+ *   APPROACH = escalating cadence that quickens on a closing target (pattern 3)
+ *   CAUTION  = 1 soft pulse, NO direction (pattern 1 / low confidence)
  *
  * A long CYCLE_GAP separates repeats so the pulses are countable, and the whole
  * signature loops (repeat=0). Intensity rides on amplitude (with a perceptible
@@ -24,7 +25,7 @@ import kotlin.math.max
  */
 object DirectionalEncoding {
 
-    enum class Direction { LEFT, RIGHT, CENTER, CURB, CAUTION }
+    enum class Direction { LEFT, RIGHT, CENTER, CURB, APPROACH, CAUTION }
 
     /**
      * A repeating waveform. [timings] and [amplitudes] are parallel; amplitude 0 is
@@ -74,7 +75,7 @@ object DirectionalEncoding {
         val li = l.coerceIn(0, 255)
         val ci = c.coerceIn(0, 255)
         val ri = r.coerceIn(0, 255)
-        val pat = pattern.coerceIn(0, 2)
+        val pat = pattern.coerceIn(0, 3)
 
         if (li == 0 && ci == 0 && ri == 0) return null
 
@@ -96,6 +97,24 @@ object DirectionalEncoding {
                 Direction.CURB,
                 longArrayOf(CYCLE_GAP, CURB_ON, CURB_GAP, CURB_ON),
                 intArrayOf(0, MAX_AMPLITUDE, 0, MAX_AMPLITUDE),
+                repeat = 0,
+            )
+        }
+
+        if (pat == 3) {
+            return HapticSignature(
+                Direction.APPROACH,
+                longArrayOf(CYCLE_GAP, 160L, 170L, 120L, 120L, 85L, 70L, 110L),
+                intArrayOf(
+                    0,
+                    softAmplitude(amp / 2),
+                    0,
+                    softAmplitude((amp * 0.68f).toInt()),
+                    0,
+                    softAmplitude((amp * 0.82f).toInt()),
+                    0,
+                    amp,
+                ),
                 repeat = 0,
             )
         }

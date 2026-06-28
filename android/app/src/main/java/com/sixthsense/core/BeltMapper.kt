@@ -36,6 +36,19 @@ object BeltMapper {
     const val PATTERN_STEADY = 0
     const val PATTERN_PULSE = 1
     const val PATTERN_DOUBLE = 2
+    const val PATTERN_APPROACH = 3
+
+    /** Crowd-mode smoothing window, in frames, used by the tuning canvas preview. */
+    const val CROWD_SMOOTHING_WINDOW = 5
+
+    /** Crowd-mode saturation cutoff (0f..1f) before crowded zones compress. */
+    const val CROWD_SATURATION_CUTOFF = 0.82f
+
+    /** Closing-speed threshold (0f..1f) that escalates into approach cadence. */
+    const val APPROACH_SPEED_THRESHOLD = 0.12f
+
+    /** Gap nudge strength (0f..1f) used to bias the clearest zone in crowd mode. */
+    const val GAP_NUDGE_STRENGTH = 0.35f
 
     /** Convenience for the BLE write path. */
     fun map(scene: SceneState): ByteArray {

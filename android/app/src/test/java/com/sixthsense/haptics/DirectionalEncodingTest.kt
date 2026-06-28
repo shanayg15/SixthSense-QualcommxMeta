@@ -71,6 +71,14 @@ class DirectionalEncodingTest {
     }
 
     @Test
+    fun approach_pattern_is_escalating_and_directionless() {
+        val sig = DirectionalEncoding.encode(listOf(120, 120, 120, 3))!!
+        assertEquals(Direction.APPROACH, sig.direction)
+        assertTrue("more than two taps", pulseCount(sig) >= 4)
+        assertTrue(sig.amplitudes.last() > sig.amplitudes[1])
+    }
+
+    @Test
     fun amplitude_mapping_respects_perceptible_floor_and_ceiling() {
         assertEquals(DirectionalEncoding.MIN_PERCEPTIBLE, DirectionalEncoding.toAmplitude(0))
         assertTrue(DirectionalEncoding.toAmplitude(1) >= DirectionalEncoding.MIN_PERCEPTIBLE)

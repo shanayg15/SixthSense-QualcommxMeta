@@ -9,7 +9,8 @@
  *   m0 = left   intensity 0..255
  *   m1 = center intensity 0..255
  *   m2 = right  intensity 0..255
- *   pattern: 0 = steady, 1 = single/caution pulse, 2 = double pulse (curb/step)
+ *   pattern: 0 = steady, 1 = single/caution pulse, 2 = double pulse (curb/step),
+ *            3 = escalating approach cadence (quickening taps)
  *
  * UUIDs (Nordic UART Service), matched by the Android BeltClient:
  *   service        6e400001-b5a3-f393-e0a9-e50e24dcca9e
@@ -55,6 +56,14 @@ const uint32_t PULSE_OFF  = 300;
 const uint32_t DBL_ON     = 120;  // pattern 2: on, off, on, long pause
 const uint32_t DBL_GAP    = 120;
 const uint32_t DBL_PAUSE  = 400;
+const uint32_t APPR_ON_1  = 80;   // pattern 3: quickening taps
+const uint32_t APPR_GAP_1 = 180;
+const uint32_t APPR_ON_2  = 100;
+const uint32_t APPR_GAP_2 = 120;
+const uint32_t APPR_ON_3  = 120;
+const uint32_t APPR_GAP_3 = 80;
+const uint32_t APPR_ON_4  = 150;
+const uint32_t APPR_PAUSE = 280;
 
 NimBLECharacteristic* gChar = nullptr;
 
@@ -81,6 +90,19 @@ bool patternGate() {
       if (p < DBL_ON + DBL_GAP + DBL_ON) return true;
       return false;
     }
+    case 3: {  // escalating approach cadence
+      uint32_t cycle = APPR_ON_1 + APPR_GAP_1 + APPR_ON_2 + APPR_GAP_2 +
+                       APPR_ON_3 + APPR_GAP_3 + APPR_ON_4 + APPR_PAUSE;
+      uint32_t p = t % cycle;
+      if (p < APPR_ON_1) return true;
+      if (p < APPR_ON_1 + APPR_GAP_1) return false;
+      if (p < APPR_ON_1 + APPR_GAP_1 + APPR_ON_2) return true;
+      if (p < APPR_ON_1 + APPR_GAP_1 + APPR_ON_2 + APPR_GAP_2) return false;
+      if (p < APPR_ON_1 + APPR_GAP_1 + APPR_ON_2 + APPR_GAP_2 + APPR_ON_3) return true;
+      if (p < APPR_ON_1 + APPR_GAP_1 + APPR_ON_2 + APPR_GAP_2 + APPR_ON_3 + APPR_GAP_3) return false;
+      if (p < APPR_ON_1 + APPR_GAP_1 + APPR_ON_2 + APPR_GAP_2 + APPR_ON_3 + APPR_GAP_3 + APPR_ON_4) return true;
+      return false;
+    }
     default:   // 0 = steady
       return true;
   }
@@ -95,7 +117,7 @@ class BeltCallbacks : public NimBLECharacteristicCallbacks {
     }
     for (int i = 0; i < NUM_MOTORS; i++) gIntensity[i] = v[i];
     uint8_t pattern = v[3];
-    if (pattern > 2) pattern = 0;
+    if (pattern > 3) pattern = 0;
     if (pattern != gPattern) gPatternStart = millis();
     gPattern = pattern;
     Serial.printf("[belt] L=%u C=%u R=%u pattern=%u\n",

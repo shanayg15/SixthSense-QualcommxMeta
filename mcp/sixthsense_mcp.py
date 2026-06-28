@@ -224,12 +224,12 @@ def clear_logcat() -> dict:
 def belt_test(left: int = 0, center: int = 0, right: int = 200, pattern: int = 0) -> dict:
     """DEBUG-ONLY: send a belt test broadcast (com.sixthsense.DEBUG_BELT).
 
-    Intensities clamped to 0-255, pattern to 0-2. Only do this when explicitly asked.
+    Intensities clamped to 0-255, pattern to 0-3. Only do this when explicitly asked.
     """
     l = _clamp(left, 0, 255)
     c = _clamp(center, 0, 255)
     r = _clamp(right, 0, 255)
-    p = _clamp(pattern, 0, 2)
+    p = _clamp(pattern, 0, 3)
     return _run([
         _adb_path(), "shell", "am", "broadcast",
         "-a", "com.sixthsense.DEBUG_BELT",
