@@ -13,6 +13,7 @@ data class DepthZones(
     val center: Float,
     val right: Float,
     val curbAhead: Boolean = false,
+    /** Reserved — step-down / drop-off detection is not implemented yet (always false). */
     val stepDown: Boolean = false,
 )
 

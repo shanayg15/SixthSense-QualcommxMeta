@@ -319,6 +319,10 @@ def qaihub_status() -> dict:
     return _run(["qai-hub", "list-jobs"], timeout=60)
 
 
-if __name__ == "__main__":
+def main() -> None:
     _log(f"starting sixthsense MCP (root={_repo_root()}, adb={_adb_path()})")
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()

@@ -12,7 +12,7 @@ compact `SceneState`. That state drives three outputs:
 
 1. **Haptic belt** — a BLE ESP32 belt with left/center/right vibration motors (a *dumb actuator*).
 2. **On-device voice agent** — push-to-talk answers to "what's ahead?", "read that sign", "find the exit".
-3. **Live dashboard** — a React/Vite visualization for judges (visualization only, no AI).
+3. **Live dashboard** — a no-build (vanilla JS) visualization for judges (visualization only, no AI).
 
 The thesis: **navigation safety should not depend on cloud connectivity.** The demo runs
 fully on-device and works in **airplane mode** once the app and models are on the phone.
@@ -35,7 +35,7 @@ sixthsense/
   mcp/                   Custom Python FastMCP server (dev/debug command center)
   scripts/               setup_mcp.sh, verify_android_env.sh, adb_common.sh
   android/               Android Studio project (Kotlin, package com.sixthsense)
-  dashboard/             React + Vite + TypeScript visualization
+  live-dashboard/        No-build (vanilla JS) judge dashboard (camera + overlays)
   firmware/esp32_belt/   ESP32 NimBLE belt firmware (dumb actuator)
 ```
 
@@ -114,19 +114,19 @@ See [mcp/README.md](mcp/README.md) and [docs/mcp_test_checklist.md](docs/mcp_tes
 ## Run the dashboard
 
 ```bash
-cd dashboard
-npm install
-npm run dev -- --host 127.0.0.1
+scripts/dashboard.sh        # serves live-dashboard/ and wires the phone link
+# or manually:  cd live-dashboard && python3 -m http.server 5173
 ```
 
-Open the printed URL (default `http://127.0.0.1:5173`). Set the phone IP in the UI to connect
-to `ws://PHONE_IP:8080`; if the socket fails it replays `src/mockFrames.json`.
+Open `http://localhost:5173` and set the **Device** box to the phone's WebSocket:
+`ws://localhost:8080` over USB (`adb forward`), or `ws://PHONE_IP:8080` over Wi-Fi / hotspot.
+See [live-dashboard/README.md](live-dashboard/README.md).
 
 ## Flash the ESP32 belt
 
 See [firmware/esp32_belt/README.md](firmware/esp32_belt/README.md). In short: Arduino IDE +
-ESP32 board package + NimBLE-Arduino, wire 3 vibration motors through a **ULN2803A** driver
-(never straight off GPIO), flash `esp32_belt.ino`, and test packets from nRF Connect.
+ESP32 board package + NimBLE-Arduino, wire the 4 driver-included vibration-motor modules
+directly to GPIOs (no ULN2803A needed), flash `esp32_belt.ino`, and test packets from nRF Connect.
 
 ---
 

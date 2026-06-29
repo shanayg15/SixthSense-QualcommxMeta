@@ -91,7 +91,7 @@ class VoiceAgent(
             append("  left:  ").append(line("left", s.depth.left)).append('\n')
             append("  right: ").append(line("right", s.depth.right)).append('\n')
             append("  text:  ").append(if (s.ocr.present) s.ocr.text else "none").append('\n')
-            if (s.depth.curbAhead || s.depth.stepDown) append("  note:  curb or step ahead\n")
+            if (s.depth.curbAhead) append("  note:  curb ahead\n")
             append("Question: ").append(question)
         }
     }
@@ -120,7 +120,7 @@ class VoiceAgent(
             else "I'm not sure the path is clear, proceed carefully."
         }
         Log.i(TAG, "Q='$question' -> A='$answer'")
-        // TODO(voice): speak `answer` via offline Android TextToSpeech.
+        // The answer is spoken by the onAnswer sink (on-device TTS), wired in MainActivity.
         onAnswer?.invoke(question, intent.name, answer)
         return answer
     }
@@ -139,7 +139,7 @@ class VoiceAgent(
     private fun describeScene(s: SceneState): String {
         if (s.conf < 0.4f) return "I'm not sure what's ahead, proceed carefully."
         val d = s.depth
-        if (d.curbAhead || d.stepDown) return "Curb or step ahead, slow down."
+        if (d.curbAhead) return "Curb ahead, slow down."
         val near = 0.55f
         return when {
             d.center >= near -> "Obstacle ahead, move slightly left or right."
