@@ -1,4 +1,4 @@
-# SixthSense
+# SixthSense - Qualcomm x Meta Hackathon
 
 **An on-device navigation copilot for blind and low-vision users.**
 
